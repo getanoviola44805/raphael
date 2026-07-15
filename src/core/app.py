@@ -1,4 +1,5 @@
 from .config import APP_NAME, APP_VERSION
+from .command_handler import CommandHandler
 
 
 class RaphaelApp:
