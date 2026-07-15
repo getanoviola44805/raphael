@@ -1,0 +1,9 @@
+[project]
+name = "raphael-assistant"
+version = "0.1.0"
+description = "Assistente AI desktop modulare per Windows"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
