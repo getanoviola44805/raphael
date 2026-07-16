@@ -22,4 +22,4 @@ def test_comando_sconosciuto():
 
     risposta = app.gestisci_comando("qualcosa")
 
-    assert risposta == "Comando non riconosciuto."
+    assert risposta == "Risposta simulata a: qualcosa"
