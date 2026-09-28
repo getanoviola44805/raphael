@@ -19,7 +19,11 @@ class RaphaelApp:
         self.command_handler = CommandHandler(self.name, self.version)
 
         if ai_provider is None:
-            ai_provider = OllamaProvider(system_prompt=config.SYSTEM_PROMPT)
+            ai_provider = OllamaProvider(
+                model=config.OLLAMA_MODEL,
+                system_prompt=config.SYSTEM_PROMPT,
+                context_length=config.OLLAMA_CONTEXT_LENGTH,
+            )
 
         self.ai_router = AIRouter(ai_provider)
         self.history = ConversationHistory()
@@ -38,7 +42,8 @@ class RaphaelApp:
 
         if risposta == "Comando non riconosciuto.":
             risposta = self.ai_router.generate_response(
-                comando, self.history.get_messages()
+                comando,
+                self.history.get_recent_messages(config.MAX_HISTORY_MESSAGES),
             )
 
         self.history.add_message("assistant", risposta)

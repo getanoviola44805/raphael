@@ -20,3 +20,6 @@ SYSTEM_PROMPT = (
     "diretto senza allungare inutilmente. Se non conosci qualcosa o non sei "
     "sicuro, dillo chiaramente invece di inventare."
 )
+OLLAMA_MODEL = "qwen3.5:9b"
+OLLAMA_CONTEXT_LENGTH = 8192
+MAX_HISTORY_MESSAGES = 10
