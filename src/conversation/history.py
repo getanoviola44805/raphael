@@ -17,6 +17,13 @@ class ConversationHistory:
     def get_messages(self):
         return self.messages
 
+    def get_recent_messages(self, limit: int):
+       return self.messages[-limit:]
+
+
+
+    
+
     def save_to_file(self, path: str):
         file_path = Path(path)
         file_path.parent.mkdir(parents=True, exist_ok=True)

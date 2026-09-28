@@ -36,3 +36,16 @@ def test_load_from_file_senza_file_esistente(tmp_path):
     history.load_from_file(file_path)
 
     assert history.get_messages() == []
+
+
+
+
+def test_get_recent_messages_restituisce_solo_gli_ultimi():
+    history = ConversationHistory()
+
+    for i in range(5):
+        history.add_message("user", f"messaggio {i}")
+
+    recenti = history.get_recent_messages(2)
+
+    assert [m["content"] for m in recenti] == ["messaggio 3", "messaggio 4"]
