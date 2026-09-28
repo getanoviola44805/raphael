@@ -16,9 +16,16 @@ class OllamaProvider(AIProvider):
         else:
             messages = [{"role": "user", "content": prompt}]
 
-        risposta = ollama.chat(
-            model=self.model,
-            messages=messages,
-        )
+        try:
+            risposta = ollama.chat(
+                model=self.model,
+                messages=messages,
+            )
+        except ConnectionError:
+            return (
+                "⚠️ Non riesco a contattare Ollama. Assicurati che sia in "
+                "esecuzione (avvialo dall'icona nella system tray oppure "
+                "con 'ollama serve') e riprova."
+            )
 
         return risposta["message"]["content"]
