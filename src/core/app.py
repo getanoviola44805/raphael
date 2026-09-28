@@ -19,7 +19,7 @@ class RaphaelApp:
         self.command_handler = CommandHandler(self.name, self.version)
 
         if ai_provider is None:
-                   ai_provider = OllamaProvider()
+            ai_provider = OllamaProvider(system_prompt=config.SYSTEM_PROMPT)
 
         self.ai_router = AIRouter(ai_provider)
         self.history = ConversationHistory()
