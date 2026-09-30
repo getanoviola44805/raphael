@@ -7,6 +7,7 @@ from rich.markdown import Markdown
 from ai.ollama_provider import OllamaProvider
 from ai.router import AIRouter
 from conversation.history import ConversationHistory
+from ui.formattazione import converti_latex
 
 from . import config
 from .command_handler import CommandHandler
@@ -59,7 +60,7 @@ class RaphaelApp:
 
     def mostra_risposta(self, risposta):
         self.console.print(f"[bold cyan]{self.name}:[/bold cyan]")
-        self.console.print(Markdown(risposta))
+        self.console.print(Markdown(converti_latex(risposta)))
         self.console.print()
 
     def start(self):
