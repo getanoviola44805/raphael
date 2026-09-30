@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 
 
 class AIProvider(ABC):
@@ -7,3 +8,12 @@ class AIProvider(ABC):
         """Genera una risposta a partire dal messaggio dell'utente,
         tenendo conto opzionalmente della cronologia della conversazione."""
         raise NotImplementedError
+
+    def generate_response_stream(
+        self, prompt: str, history: list | None = None
+    ) -> Iterator[str]:
+        """Genera la risposta un pezzo alla volta.
+
+        Di base restituisce tutta la risposta in un unico pezzo: i provider
+        che supportano lo streaming possono sovrascrivere questo metodo."""
+        yield self.generate_response(prompt, history)

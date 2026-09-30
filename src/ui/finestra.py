@@ -1,8 +1,15 @@
 import sys
 import threading
 
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QPalette,
+    QTextBlockFormat,
+    QTextCharFormat,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -19,9 +26,12 @@ from .formattazione import converti_latex
 
 
 MESSAGGI_MOSTRATI_ALL_AVVIO = 20
+INTERVALLO_AGGIORNAMENTO_MS = 100
 
 
-def componi_markdown_chat(messaggi, nome_assistente, in_attesa=False):
+def componi_markdown_chat(
+    messaggi, nome_assistente, in_attesa=False, risposta_parziale=""
+):
     blocchi = []
 
     for messaggio in messaggi:
@@ -31,14 +41,18 @@ def componi_markdown_chat(messaggi, nome_assistente, in_attesa=False):
             testo = converti_latex(messaggio["content"])
             blocchi.append(f"**{nome_assistente}:**\n\n{testo}")
 
-    if in_attesa:
+    if risposta_parziale:
+        testo = converti_latex(risposta_parziale)
+        blocchi.append(f"**{nome_assistente}:**\n\n{testo}")
+    elif in_attesa:
         blocchi.append(f"*{nome_assistente} sta scrivendo...*")
 
     return "\n\n---\n\n".join(blocchi)
 
 
 class _Segnali(QObject):
-    risposta_pronta = Signal(str)
+    pezzo_ricevuto = Signal(str)
+    risposta_completata = Signal()
 
 
 class FinestraRaphael(QMainWindow):
@@ -49,9 +63,17 @@ class FinestraRaphael(QMainWindow):
             raphael.history.get_recent_messages(MESSAGGI_MOSTRATI_ALL_AVVIO)
         )
         self.in_attesa = False
+        self.risposta_parziale = ""
+        self._da_aggiornare = False
+        self._inizio_risposta = None
 
         self.segnali = _Segnali()
-        self.segnali.risposta_pronta.connect(self._ricevi_risposta)
+        self.segnali.pezzo_ricevuto.connect(self._ricevi_pezzo)
+        self.segnali.risposta_completata.connect(self._completa_risposta)
+
+        self.timer_aggiornamento = QTimer(self)
+        self.timer_aggiornamento.setInterval(INTERVALLO_AGGIORNAMENTO_MS)
+        self.timer_aggiornamento.timeout.connect(self._aggiorna_se_serve)
 
         self.setWindowTitle(f"{raphael.name} {raphael.version}")
         self.resize(900, 700)
@@ -84,7 +106,7 @@ class FinestraRaphael(QMainWindow):
         contenitore.setLayout(layout)
         self.setCentralWidget(contenitore)
 
-        self._aggiorna_chat()
+        self._aggiorna_chat(forza_scorrimento=True)
         self.casella.setFocus()
 
     def invia(self):
@@ -95,8 +117,10 @@ class FinestraRaphael(QMainWindow):
 
         self.casella.clear()
         self.messaggi.append({"role": "user", "content": testo})
+        self.risposta_parziale = ""
         self._imposta_attesa(True)
-        self._aggiorna_chat()
+        self._prepara_risposta_in_arrivo()
+        self.timer_aggiornamento.start()
 
         lavoro = threading.Thread(
             target=self._chiedi_a_raphael,
@@ -107,14 +131,92 @@ class FinestraRaphael(QMainWindow):
 
     def _chiedi_a_raphael(self, testo):
         try:
-            risposta = self.raphael.gestisci_comando(testo)
+            for pezzo in self.raphael.gestisci_comando_stream(testo):
+                self.segnali.pezzo_ricevuto.emit(pezzo)
         except Exception as errore:
-            risposta = f"⚠️ Si è verificato un errore: {errore}"
+            self.segnali.pezzo_ricevuto.emit(
+                f"\n\n⚠️ Si è verificato un errore: {errore}"
+            )
 
-        self.segnali.risposta_pronta.emit(risposta)
+        self.segnali.risposta_completata.emit()
 
-    def _ricevi_risposta(self, risposta):
-        self.messaggi.append({"role": "assistant", "content": risposta})
+    def _ricevi_pezzo(self, pezzo):
+        self.risposta_parziale += pezzo
+        self._da_aggiornare = True
+
+    def _aggiorna_se_serve(self):
+        if self._da_aggiornare:
+            self._da_aggiornare = False
+            self._aggiorna_risposta_in_arrivo()
+
+    def _prepara_risposta_in_arrivo(self):
+        # Disegna una sola volta i messaggi precedenti e l'intestazione della
+        # risposta: durante lo streaming verrà aggiornata solo la parte finale.
+        precedenti = componi_markdown_chat(self.messaggi, self.raphael.name)
+        intestazione = f"**{self.raphael.name}:**"
+
+        if precedenti:
+            testo = f"{precedenti}\n\n---\n\n{intestazione}"
+        else:
+            testo = intestazione
+
+        self.chat.setMarkdown(testo)
+
+        cursore = QTextCursor(self.chat.document())
+        cursore.movePosition(QTextCursor.MoveOperation.End)
+        cursore.insertBlock(QTextBlockFormat(), QTextCharFormat())
+        self._inizio_risposta = cursore.position()
+
+        self._sostituisci_risposta(f"*{self.raphael.name} sta scrivendo...*")
+
+        barra = self.chat.verticalScrollBar()
+        barra.setValue(barra.maximum())
+
+    def _aggiorna_risposta_in_arrivo(self):
+        if self._inizio_risposta is None:
+            return
+
+        barra = self.chat.verticalScrollBar()
+        posizione = barra.value()
+        era_in_fondo = posizione >= barra.maximum() - 20
+
+        self.chat.setUpdatesEnabled(False)
+        self._sostituisci_risposta(converti_latex(self.risposta_parziale))
+
+        if era_in_fondo:
+            barra.setValue(barra.maximum())
+        else:
+            barra.setValue(posizione)
+
+        self.chat.setUpdatesEnabled(True)
+
+    def _sostituisci_risposta(self, markdown):
+        cursore = QTextCursor(self.chat.document())
+        cursore.setPosition(self._inizio_risposta)
+        cursore.movePosition(
+            QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor
+        )
+        cursore.removeSelectedText()
+
+        # Toglie la formattazione rimasta dall'aggiornamento precedente
+        # (elenchi, titoli...), così il nuovo testo riparte da zero.
+        elenco = cursore.currentList()
+        if elenco is not None:
+            elenco.remove(cursore.block())
+        cursore.setBlockFormat(QTextBlockFormat())
+        cursore.setBlockCharFormat(QTextCharFormat())
+        cursore.setCharFormat(QTextCharFormat())
+
+        cursore.insertMarkdown(markdown)
+
+    def _completa_risposta(self):
+        self.timer_aggiornamento.stop()
+        self.messaggi.append(
+            {"role": "assistant", "content": self.risposta_parziale}
+        )
+        self.risposta_parziale = ""
+        self._da_aggiornare = False
+        self._inizio_risposta = None
         self._imposta_attesa(False)
         self._aggiorna_chat()
         self.raphael.salva_cronologia()
@@ -128,12 +230,30 @@ class FinestraRaphael(QMainWindow):
         if not attesa:
             self.casella.setFocus()
 
-    def _aggiorna_chat(self):
-        self.chat.setMarkdown(
-            componi_markdown_chat(self.messaggi, self.raphael.name, self.in_attesa)
-        )
+    def _aggiorna_chat(self, forza_scorrimento=False):
         barra = self.chat.verticalScrollBar()
-        barra.setValue(barra.maximum())
+        posizione = barra.value()
+        era_in_fondo = posizione >= barra.maximum() - 20
+
+        # Ridisegna tutto in un colpo solo: senza questa accortezza la finestra
+        # mostrerebbe per un istante la chat tornata in cima, causando uno scatto.
+        self.chat.setUpdatesEnabled(False)
+
+        self.chat.setMarkdown(
+            componi_markdown_chat(
+                self.messaggi,
+                self.raphael.name,
+                self.in_attesa,
+                self.risposta_parziale,
+            )
+        )
+
+        if forza_scorrimento or era_in_fondo:
+            barra.setValue(barra.maximum())
+        else:
+            barra.setValue(posizione)
+
+        self.chat.setUpdatesEnabled(True)
 
     def closeEvent(self, evento):
         self.raphael.salva_cronologia()
