@@ -1,4 +1,5 @@
 import logging
+import shutil
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -20,7 +21,9 @@ class RaphaelApp:
         self.name = APP_NAME
         self.version = APP_VERSION
         self.command_handler = CommandHandler(self.name, self.version)
-        self.console = Console()
+
+        larghezza = min(100, shutil.get_terminal_size().columns - 1)
+        self.console = Console(width=larghezza)
 
         if ai_provider is None:
             ai_provider = OllamaProvider(
