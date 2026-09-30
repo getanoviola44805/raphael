@@ -92,10 +92,18 @@ class OllamaProvider(AIProvider):
         return contenuto
 
     def generate_response_stream(
-        self, prompt: str, history: list | None = None
+        self,
+        prompt: str,
+        history: list | None = None,
+        ragiona: bool = False,
+        immagini: list | None = None,
     ) -> Iterator[str]:
         messaggi = self._prepara_messaggi(prompt, history)
         testo_generato = False
+
+        if immagini:
+            # Le immagini vanno allegate all'ultimo messaggio dell'utente.
+            messaggi[-1]["images"] = [str(immagine) for immagine in immagini]
 
         try:
             for _ in range(MAX_GIRI_STRUMENTI + 1):
@@ -106,7 +114,7 @@ class OllamaProvider(AIProvider):
                 pezzi = ollama.chat(
                     model=self.model,
                     messages=messaggi,
-                    think=False,
+                    think=ragiona,
                     options={"num_ctx": self.context_length},
                     stream=True,
                     **opzioni_extra,
@@ -159,7 +167,9 @@ class OllamaProvider(AIProvider):
             if self.strumenti and "does not support tools" in str(errore.error):
                 logger.warning("Il modello %s non supporta gli strumenti", self.model)
                 self.strumenti = []
-                yield from self.generate_response_stream(prompt, history)
+                yield from self.generate_response_stream(
+                    prompt, history, ragiona=ragiona, immagini=immagini
+                )
                 return
 
             yield f"⚠️ Ollama ha restituito un errore: {errore.error}"

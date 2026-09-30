@@ -66,3 +66,52 @@ def test_la_ricerca_in_streaming_aggiunge_le_fonti_alla_fine():
 
     assert pezzi[:3] == ["Uno, ", "due, ", "tre."]
     assert "https://esempio.it" in pezzi[-1]
+
+class ProviderCheRegistra(AIProvider):
+    def __init__(self):
+        self.opzioni = None
+
+    def generate_response(self, prompt, history=None):
+        return "ok"
+
+    def generate_response_stream(self, prompt, history=None, **opzioni):
+        self.opzioni = opzioni
+        yield "ok"
+
+
+def test_senza_opzioni_il_provider_non_riceve_niente_in_piu():
+    provider = ProviderCheRegistra()
+    app = RaphaelApp(ai_provider=provider)
+
+    list(app.gestisci_comando_stream("domanda"))
+
+    assert provider.opzioni == {}
+
+
+def test_il_ragionamento_arriva_al_provider():
+    provider = ProviderCheRegistra()
+    app = RaphaelApp(ai_provider=provider)
+
+    list(app.gestisci_comando_stream("domanda", ragiona=True))
+
+    assert provider.opzioni == {"ragiona": True}
+
+
+def test_le_immagini_arrivano_al_provider_e_restano_nella_cronologia():
+    provider = ProviderCheRegistra()
+    app = RaphaelApp(ai_provider=provider)
+
+    list(app.gestisci_comando_stream("cosa vedi?", immagini=["C:/foto/esercizio.jpg"]))
+
+    assert provider.opzioni == {"immagini": ["C:/foto/esercizio.jpg"]}
+    ultima_domanda = app.history.get_messages()[-2]["content"]
+    assert ultima_domanda == "cosa vedi?\n\n[Immagine allegata: esercizio.jpg]"
+
+
+def test_un_comando_con_immagine_va_comunque_al_modello():
+    provider = ProviderCheRegistra()
+    app = RaphaelApp(ai_provider=provider)
+
+    risposta = "".join(app.gestisci_comando_stream("ciao", immagini=["foto.jpg"]))
+
+    assert risposta == "ok"

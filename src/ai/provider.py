@@ -10,10 +10,11 @@ class AIProvider(ABC):
         raise NotImplementedError
 
     def generate_response_stream(
-        self, prompt: str, history: list | None = None
+        self, prompt: str, history: list | None = None, **opzioni
     ) -> Iterator[str]:
         """Genera la risposta un pezzo alla volta.
 
-        Di base restituisce tutta la risposta in un unico pezzo: i provider
-        che supportano lo streaming possono sovrascrivere questo metodo."""
+        Di base restituisce tutta la risposta in un unico pezzo e ignora le
+        opzioni aggiuntive (ragionamento, immagini...): i provider che le
+        supportano possono sovrascrivere questo metodo."""
         yield self.generate_response(prompt, history)

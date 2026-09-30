@@ -1,11 +1,15 @@
 import sys
 import threading
+from datetime import datetime
+from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
     QIcon,
+    QImage,
+    QKeySequence,
     QPalette,
     QTextBlockFormat,
     QTextCharFormat,
@@ -13,6 +17,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -23,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import config
 from core.percorsi import percorso_risorsa
 
 from .formattazione import converti_latex
@@ -30,6 +36,30 @@ from .formattazione import converti_latex
 
 MESSAGGI_MOSTRATI_ALL_AVVIO = 20
 INTERVALLO_AGGIORNAMENTO_MS = 100
+LATO_MASSIMO_IMMAGINE = 1600
+FILTRO_IMMAGINI = "Immagini (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
+DOMANDA_PREDEFINITA_IMMAGINE = "Descrivi questa immagine."
+
+
+def salva_immagine_ridotta(immagine: QImage, cartella: Path, nome_base: str) -> Path:
+    """Salva una copia dell'immagine, rimpicciolita se è molto grande.
+
+    Le foto del telefono possono avere migliaia di pixel per lato: ridurle
+    rende la risposta del modello molto più veloce senza perdere leggibilità.
+    """
+    if max(immagine.width(), immagine.height()) > LATO_MASSIMO_IMMAGINE:
+        immagine = immagine.scaled(
+            LATO_MASSIMO_IMMAGINE,
+            LATO_MASSIMO_IMMAGINE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+    cartella.mkdir(parents=True, exist_ok=True)
+    istante = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    percorso = cartella / f"{nome_base}_{istante}.jpg"
+    immagine.save(str(percorso), "JPG", 92)
+    return percorso
 
 
 def componi_markdown_chat(
@@ -59,9 +89,14 @@ class _Segnali(QObject):
 
 
 class FinestraRaphael(QMainWindow):
-    def __init__(self, raphael):
+    def __init__(self, raphael, cartella_allegati=None):
         super().__init__()
         self.raphael = raphael
+        self.cartella_allegati = Path(
+            cartella_allegati or config.DATA_DIR / "allegati"
+        )
+        self.allegato = None
+        self.nome_allegato = ""
         self.messaggi = list(
             raphael.history.get_recent_messages(MESSAGGI_MOSTRATI_ALL_AVVIO)
         )
@@ -92,49 +127,149 @@ class FinestraRaphael(QMainWindow):
             "Scrivi un messaggio... (usa /cerca per cercare sul web)"
         )
         self.casella.returnPressed.connect(self.invia)
+        self.casella.installEventFilter(self)
 
         self.bottone = QPushButton("Invia")
         self.bottone.clicked.connect(self.invia)
 
+        self.bottone_allega = QPushButton("📎")
+        self.bottone_allega.setFixedWidth(40)
+        self.bottone_allega.setToolTip(
+            "Allega un'immagine (puoi anche incollarla con Ctrl+V)"
+        )
+        self.bottone_allega.clicked.connect(self.scegli_immagine)
+
+        self.bottone_ragiona = QPushButton("🧠 Ragiona")
+        self.bottone_ragiona.setCheckable(True)
+        self.bottone_ragiona.setStyleSheet(
+            "QPushButton:checked { background-color: #3d7bd9; color: white; }"
+        )
+        self.bottone_ragiona.setToolTip(
+            "Il modello ragiona passo passo prima di rispondere: "
+            "più lento, ma più preciso su matematica, fisica ed esercizi"
+        )
+
+        self.etichetta_allegato = QLabel("")
+        self.bottone_togli_allegato = QPushButton("✕")
+        self.bottone_togli_allegato.setFixedWidth(28)
+        self.bottone_togli_allegato.setToolTip("Togli l'immagine allegata")
+        self.bottone_togli_allegato.clicked.connect(self.togli_allegato)
+
+        riga_allegato = QHBoxLayout()
+        riga_allegato.addWidget(self.etichetta_allegato)
+        riga_allegato.addWidget(self.bottone_togli_allegato)
+        riga_allegato.addStretch()
+
         riga_input = QHBoxLayout()
+        riga_input.addWidget(self.bottone_allega)
         riga_input.addWidget(self.casella)
+        riga_input.addWidget(self.bottone_ragiona)
         riga_input.addWidget(self.bottone)
 
         layout = QVBoxLayout()
         layout.addWidget(self.chat)
         layout.addWidget(self.stato)
+        layout.addLayout(riga_allegato)
         layout.addLayout(riga_input)
 
         contenitore = QWidget()
         contenitore.setLayout(layout)
         self.setCentralWidget(contenitore)
 
+        self._mostra_allegato()
         self._aggiorna_chat(forza_scorrimento=True)
         self.casella.setFocus()
+
+    def eventFilter(self, oggetto, evento):
+        # Ctrl+V nella casella: se negli appunti c'è un'immagine (per esempio
+        # uno screenshot fatto con Win+Shift+S) la allega invece di incollare testo.
+        if (
+            oggetto is self.casella
+            and evento.type() == QEvent.Type.KeyPress
+            and evento.matches(QKeySequence.StandardKey.Paste)
+        ):
+            immagine = QApplication.clipboard().image()
+
+            if not immagine.isNull():
+                self.allega_immagine(immagine, "incollata")
+                return True
+
+        return super().eventFilter(oggetto, evento)
+
+    def scegli_immagine(self):
+        percorso, _ = QFileDialog.getOpenFileName(
+            self, "Allega un'immagine", "", FILTRO_IMMAGINI
+        )
+
+        if not percorso:
+            return
+
+        immagine = QImage(percorso)
+
+        if immagine.isNull():
+            self.stato.setText("⚠️ Non riesco a leggere questa immagine.")
+            return
+
+        self.allega_immagine(immagine, Path(percorso).stem)
+
+    def allega_immagine(self, immagine, nome_base):
+        self.allegato = salva_immagine_ridotta(
+            immagine, self.cartella_allegati, nome_base
+        )
+        self.nome_allegato = nome_base
+        self._mostra_allegato()
+
+    def togli_allegato(self):
+        self.allegato = None
+        self._mostra_allegato()
+
+    def _mostra_allegato(self):
+        if self.allegato is None:
+            self.etichetta_allegato.setText("")
+            self.etichetta_allegato.hide()
+            self.bottone_togli_allegato.hide()
+        else:
+            self.etichetta_allegato.setText(f"🖼️ {self.nome_allegato}")
+            self.etichetta_allegato.show()
+            self.bottone_togli_allegato.show()
 
     def invia(self):
         testo = self.casella.text().strip()
 
-        if not testo or self.in_attesa:
+        if self.in_attesa or (not testo and self.allegato is None):
             return
 
+        if not testo:
+            testo = DOMANDA_PREDEFINITA_IMMAGINE
+
+        immagini = [self.allegato] if self.allegato is not None else None
+        ragiona = self.bottone_ragiona.isChecked()
+
+        testo_mostrato = testo
+        if immagini:
+            testo_mostrato = f"{testo}\n\n[Immagine allegata: {self.allegato.name}]"
+
         self.casella.clear()
-        self.messaggi.append({"role": "user", "content": testo})
+        self.togli_allegato()
+        self.messaggi.append({"role": "user", "content": testo_mostrato})
         self.risposta_parziale = ""
-        self._imposta_attesa(True)
+        self._imposta_attesa(True, ragiona)
         self._prepara_risposta_in_arrivo()
         self.timer_aggiornamento.start()
 
         lavoro = threading.Thread(
             target=self._chiedi_a_raphael,
-            args=(testo,),
+            args=(testo, ragiona, immagini),
             daemon=True,
         )
         lavoro.start()
 
-    def _chiedi_a_raphael(self, testo):
+    def _chiedi_a_raphael(self, testo, ragiona=False, immagini=None):
         try:
-            for pezzo in self.raphael.gestisci_comando_stream(testo):
+            pezzi = self.raphael.gestisci_comando_stream(
+                testo, ragiona=ragiona, immagini=immagini
+            )
+            for pezzo in pezzi:
                 self.segnali.pezzo_ricevuto.emit(pezzo)
         except Exception as errore:
             self.segnali.pezzo_ricevuto.emit(
@@ -224,11 +359,26 @@ class FinestraRaphael(QMainWindow):
         self._aggiorna_chat()
         self.raphael.salva_cronologia()
 
-    def _imposta_attesa(self, attesa):
+    def _imposta_attesa(self, attesa, ragiona=False):
         self.in_attesa = attesa
-        self.casella.setEnabled(not attesa)
-        self.bottone.setEnabled(not attesa)
-        self.stato.setText(f"{self.raphael.name} sta pensando..." if attesa else "")
+
+        for controllo in (
+            self.casella,
+            self.bottone,
+            self.bottone_allega,
+            self.bottone_ragiona,
+        ):
+            controllo.setEnabled(not attesa)
+
+        if not attesa:
+            self.stato.setText("")
+        elif ragiona:
+            self.stato.setText(
+                f"{self.raphael.name} sta ragionando... "
+                "(con il ragionamento attivo può volerci qualche minuto)"
+            )
+        else:
+            self.stato.setText(f"{self.raphael.name} sta pensando...")
 
         if not attesa:
             self.casella.setFocus()
