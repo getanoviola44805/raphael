@@ -6,3 +6,5 @@ logs/
 .pytest_cache/
 data/
 .env
+build/
+dist/

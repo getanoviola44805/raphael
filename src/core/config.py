@@ -1,14 +1,15 @@
-from pathlib import Path
+import os
 
 from dotenv import load_dotenv
-import os
+
+from .percorsi import cartella_dati
 
 load_dotenv()
 
 APP_NAME = "Raphael"
 APP_VERSION = "0.1.0"
 
-DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+DATA_DIR = cartella_dati() / "data"
 HISTORY_FILE = DATA_DIR / "history.json"
 
 AI_API_KEY = os.getenv("AI_API_KEY")
@@ -23,7 +24,7 @@ SYSTEM_PROMPT = (
     "domanda richiede dettagli, approfondisci; se è semplice, rispondi in modo "
     "diretto senza allungare inutilmente. Se non conosci qualcosa o non sei "
     "sicuro, dillo chiaramente invece di inventare. "
-    "Le tue risposte vengono mostrate in un terminale che non può visualizzare "
+    "Le tue risposte vengono mostrate in un'interfaccia che non può visualizzare "
     "il LaTeX: non usare mai simboli come $ o comandi come \\vec, \\frac o "
     "\\nabla. Scrivi le formule come testo leggibile, usando se serve simboli "
     "Unicode, ad esempio: F = q·E, c = 1/√(ε₀·μ₀), ∮ B·dl = μ₀·I. "
