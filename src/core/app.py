@@ -1,5 +1,6 @@
 import logging
 import shutil
+from pathlib import Path
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -12,8 +13,8 @@ from tools.web_search import (
     cerca_sul_web,
     formatta_fonti,
     prepara_domanda_con_risultati,
-    ricerca_web,
 )
+from tools.web_search import ricerca_web as strumento_ricerca_web
 from ui.formattazione import converti_latex
 
 from . import config
@@ -45,7 +46,7 @@ class RaphaelApp:
                 model=config.OLLAMA_MODEL,
                 system_prompt=config.SYSTEM_PROMPT,
                 context_length=config.OLLAMA_CONTEXT_LENGTH,
-                strumenti=STRUMENTI_PC + [ricerca_web],
+                strumenti=STRUMENTI_PC + [strumento_ricerca_web],
             )
 
         if ricerca_web is None:
@@ -65,17 +66,24 @@ class RaphaelApp:
     def gestisci_comando(self, comando):
         return "".join(self.gestisci_comando_stream(comando))
 
-    def gestisci_comando_stream(self, comando):
-        self.history.add_message("user", comando)
+    def gestisci_comando_stream(self, comando, ragiona=False, immagini=None):
+        immagini = list(immagini or [])
+        testo_utente = comando
+
+        if immagini:
+            nomi = ", ".join(Path(immagine).name for immagine in immagini)
+            testo_utente = f"{comando}\n\n[Immagine allegata: {nomi}]"
+
+        self.history.add_message("user", testo_utente)
         pezzi_risposta = []
 
-        for pezzo in self._genera_risposta(comando):
+        for pezzo in self._genera_risposta(comando, ragiona, immagini):
             pezzi_risposta.append(pezzo)
             yield pezzo
 
         self.history.add_message("assistant", "".join(pezzi_risposta))
 
-    def _genera_risposta(self, comando):
+    def _genera_risposta(self, comando, ragiona=False, immagini=None):
         if e_una_ricerca(comando):
             domanda = comando[len(COMANDO_RICERCA):].strip()
             yield from self._rispondi_con_ricerca(domanda)
@@ -83,13 +91,22 @@ class RaphaelApp:
 
         risposta = self.command_handler.handle(comando)
 
-        if risposta != "Comando non riconosciuto.":
+        if risposta != "Comando non riconosciuto." and not immagini:
             yield risposta
             return
+
+        # Le opzioni vengono passate solo se servono, così i provider che non
+        # le conoscono continuano a funzionare come prima.
+        opzioni = {}
+        if ragiona:
+            opzioni["ragiona"] = True
+        if immagini:
+            opzioni["immagini"] = immagini
 
         yield from self.ai_router.generate_response_stream(
             comando,
             self.history.get_recent_messages(config.MAX_HISTORY_MESSAGES),
+            **opzioni,
         )
 
     def _rispondi_con_ricerca(self, domanda):

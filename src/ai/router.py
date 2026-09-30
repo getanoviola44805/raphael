@@ -11,6 +11,6 @@ class AIRouter:
         return self.provider.generate_response(prompt, history)
 
     def generate_response_stream(
-        self, prompt: str, history: list | None = None
+        self, prompt: str, history: list | None = None, **opzioni
     ) -> Iterator[str]:
-        return self.provider.generate_response_stream(prompt, history)
+        return self.provider.generate_response_stream(prompt, history, **opzioni)

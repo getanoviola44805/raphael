@@ -169,3 +169,49 @@ def test_stream_riprova_senza_strumenti_se_il_modello_non_li_supporta():
 
     assert pezzi == ["Ciao!"]
     assert "tools" not in chat_finto.call_args_list[1].kwargs
+
+
+def test_stream_con_ragionamento_attiva_think():
+    provider = OllamaProvider()
+
+    with patch(
+        "ai.ollama_provider.ollama.chat", return_value=pezzi_finti("ok")
+    ) as chat_finto:
+        list(provider.generate_response_stream("quanto fa 2+2?", ragiona=True))
+
+    assert chat_finto.call_args.kwargs["think"] is True
+
+
+def test_stream_senza_ragionamento_lo_lascia_spento():
+    provider = OllamaProvider()
+
+    with patch(
+        "ai.ollama_provider.ollama.chat", return_value=pezzi_finti("ok")
+    ) as chat_finto:
+        list(provider.generate_response_stream("ciao"))
+
+    assert chat_finto.call_args.kwargs["think"] is False
+
+
+def test_stream_allega_le_immagini_all_ultimo_messaggio():
+    provider = OllamaProvider()
+    cronologia = [
+        {"role": "user", "content": "ciao"},
+        {"role": "assistant", "content": "Ciao!"},
+        {"role": "user", "content": "cosa c'è in questa foto?"},
+    ]
+
+    with patch(
+        "ai.ollama_provider.ollama.chat", return_value=pezzi_finti("Un gatto.")
+    ) as chat_finto:
+        list(
+            provider.generate_response_stream(
+                "cosa c'è in questa foto?",
+                cronologia,
+                immagini=["C:/foto/gatto.jpg"],
+            )
+        )
+
+    messaggi = chat_finto.call_args.kwargs["messages"]
+    assert messaggi[-1]["images"] == ["C:/foto/gatto.jpg"]
+    assert "images" not in messaggi[0]
