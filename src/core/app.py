@@ -12,6 +12,7 @@ from tools.web_search import (
     cerca_sul_web,
     formatta_fonti,
     prepara_domanda_con_risultati,
+    ricerca_web,
 )
 from ui.formattazione import converti_latex
 
@@ -44,7 +45,7 @@ class RaphaelApp:
                 model=config.OLLAMA_MODEL,
                 system_prompt=config.SYSTEM_PROMPT,
                 context_length=config.OLLAMA_CONTEXT_LENGTH,
-                strumenti=STRUMENTI_PC,
+                strumenti=STRUMENTI_PC + [ricerca_web],
             )
 
         if ricerca_web is None:

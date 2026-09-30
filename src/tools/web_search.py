@@ -56,3 +56,37 @@ def formatta_fonti(risultati: list[dict]) -> str:
         for numero, risultato in enumerate(risultati, start=1)
     ]
     return "**Fonti:**\n\n" + "\n".join(righe)
+
+
+def ricerca_web(domanda: str) -> str:
+    """Cerca informazioni aggiornate su internet.
+
+    Usala per notizie, meteo, prezzi, orari, eventi e per tutto ciò che può
+    essere cambiato di recente o che non conosci con certezza.
+
+    Args:
+        domanda: Cosa cercare, scritto come in un motore di ricerca, ad esempio "meteo Catania domani".
+
+    Returns:
+        I risultati della ricerca, numerati, con titolo, link ed estratto.
+    """
+    risultati = cerca_sul_web(domanda)
+
+    if not risultati:
+        return (
+            f"La ricerca sul web per '{domanda}' non ha dato risultati "
+            "o non è riuscita: controlla la connessione a internet."
+        )
+
+    oggi = date.today().strftime("%d/%m/%Y")
+    blocchi = [
+        f"[{numero}] {risultato['titolo']}\n"
+        f"Link: {risultato['link']}\n"
+        f"{risultato['estratto']}"
+        for numero, risultato in enumerate(risultati, start=1)
+    ]
+
+    return (
+        f"Ho cercato sul web: '{domanda}' ({len(risultati)} risultati).\n"
+        f"Data di oggi: {oggi}.\n\n" + "\n\n".join(blocchi)
+    )
