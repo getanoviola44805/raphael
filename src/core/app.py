@@ -60,38 +60,51 @@ class RaphaelApp:
         )
 
     def gestisci_comando(self, comando):
-        self.history.add_message("user", comando)
+        return "".join(self.gestisci_comando_stream(comando))
 
+    def gestisci_comando_stream(self, comando):
+        self.history.add_message("user", comando)
+        pezzi_risposta = []
+
+        for pezzo in self._genera_risposta(comando):
+            pezzi_risposta.append(pezzo)
+            yield pezzo
+
+        self.history.add_message("assistant", "".join(pezzi_risposta))
+
+    def _genera_risposta(self, comando):
         if e_una_ricerca(comando):
             domanda = comando[len(COMANDO_RICERCA):].strip()
-            risposta = self.rispondi_con_ricerca(domanda)
-        else:
-            risposta = self.command_handler.handle(comando)
+            yield from self._rispondi_con_ricerca(domanda)
+            return
 
-            if risposta == "Comando non riconosciuto.":
-                risposta = self.ai_router.generate_response(
-                    comando,
-                    self.history.get_recent_messages(config.MAX_HISTORY_MESSAGES),
-                )
+        risposta = self.command_handler.handle(comando)
 
-        self.history.add_message("assistant", risposta)
+        if risposta != "Comando non riconosciuto.":
+            yield risposta
+            return
 
-        return risposta
+        yield from self.ai_router.generate_response_stream(
+            comando,
+            self.history.get_recent_messages(config.MAX_HISTORY_MESSAGES),
+        )
 
-    def rispondi_con_ricerca(self, domanda):
+    def _rispondi_con_ricerca(self, domanda):
         if not domanda:
-            return (
+            yield (
                 "Scrivi cosa vuoi cercare dopo /cerca, ad esempio: "
                 "/cerca meteo Catania domani"
             )
+            return
 
         risultati = self.ricerca_web(domanda, config.WEB_SEARCH_MAX_RESULTS)
 
         if not risultati:
-            return (
+            yield (
                 "⚠️ Non sono riuscito a cercare sul web in questo momento. "
                 "Controlla la connessione a internet e riprova."
             )
+            return
 
         domanda_arricchita = prepara_domanda_con_risultati(domanda, risultati)
 
@@ -102,9 +115,10 @@ class RaphaelApp:
             {"role": "user", "content": domanda_arricchita}
         ]
 
-        risposta = self.ai_router.generate_response(domanda_arricchita, messaggi)
-
-        return f"{risposta}\n\n{formatta_fonti(risultati)}"
+        yield from self.ai_router.generate_response_stream(
+            domanda_arricchita, messaggi
+        )
+        yield f"\n\n{formatta_fonti(risultati)}"
 
     def salva_cronologia(self):
         self.history.save_to_file(config.HISTORY_FILE)
