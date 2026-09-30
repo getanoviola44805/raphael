@@ -1,9 +1,42 @@
 import re
 
-from pylatexenc.latex2text import LatexNodes2Text
+from pylatexenc.latex2text import (
+    LatexNodes2Text,
+    MacroTextSpec,
+    get_default_latex_context_db,
+)
 
 
-_convertitore = LatexNodes2Text()
+def _frazione(nodo, l2tobj):
+    argomenti = nodo.nodeargd.argnlist
+    numeratore = l2tobj.nodelist_to_text([argomenti[0]]).strip()
+    denominatore = l2tobj.nodelist_to_text([argomenti[1]]).strip()
+
+    def tra_parentesi(parte):
+        if len(parte) == 1 or parte.isdigit():
+            return parte
+        return f"({parte})"
+
+    return f"{tra_parentesi(numeratore)}/{tra_parentesi(denominatore)}"
+
+
+def _crea_convertitore():
+    contesto = get_default_latex_context_db()
+    contesto.add_context_category(
+        "raphael",
+        prepend=True,
+        macros=[
+            MacroTextSpec(nome, simplify_repl=_frazione)
+            for nome in ("frac", "dfrac", "tfrac")
+        ],
+    )
+    return LatexNodes2Text(
+        latex_context=contesto,
+        strict_latex_spaces="based-on-source",
+    )
+
+
+_convertitore = _crea_convertitore()
 
 # Blocchi di codice (```...```) e codice in linea (`...`): non vanno toccati
 _BLOCCHI_CODICE = re.compile(r"(```.*?```|`[^`\n]+`)", re.DOTALL)

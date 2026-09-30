@@ -27,3 +27,14 @@ def test_non_tocca_il_codice():
     testo = "Nel codice `prezzo = $x$` non cambia nulla."
 
     assert converti_latex(testo) == testo
+
+
+def test_frazioni_con_parentesi_corrette():
+    risultato = converti_latex(r"$x = \frac{-b \pm \sqrt{\Delta}}{2a}$")
+
+    assert risultato.startswith("x = (-b")
+    assert risultato.endswith(")/(2a)")
+
+
+def test_frazioni_semplici_senza_parentesi_inutili():
+    assert converti_latex(r"$\frac{1}{2}$") == "1/2"
