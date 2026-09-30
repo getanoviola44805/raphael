@@ -1,8 +1,13 @@
 import logging
+import shutil
+
+from rich.console import Console
+from rich.markdown import Markdown
 
 from ai.ollama_provider import OllamaProvider
 from ai.router import AIRouter
 from conversation.history import ConversationHistory
+from ui.formattazione import converti_latex
 
 from . import config
 from .command_handler import CommandHandler
@@ -17,6 +22,9 @@ class RaphaelApp:
         self.name = APP_NAME
         self.version = APP_VERSION
         self.command_handler = CommandHandler(self.name, self.version)
+
+        larghezza = min(100, shutil.get_terminal_size().columns - 1)
+        self.console = Console(width=larghezza)
 
         if ai_provider is None:
             ai_provider = OllamaProvider(
@@ -50,16 +58,24 @@ class RaphaelApp:
 
         return risposta
 
+    def mostra_risposta(self, risposta):
+        self.console.print(f"[bold cyan]{self.name}:[/bold cyan]")
+        self.console.print(Markdown(converti_latex(risposta)))
+        self.console.print()
+
     def start(self):
-        print(f"Benvenuto in {self.name}!")
+        self.console.print(f"[bold]Benvenuto in {self.name}![/bold]")
 
         while True:
             comando = input("Tu: ").strip()
 
+            if not comando:
+                continue
+
             if comando.lower() in {"esci", "exit", "quit"}:
                 self.history.save_to_file(config.HISTORY_FILE)
-                print(f"{self.name}: A presto.")
+                self.console.print(f"[bold cyan]{self.name}:[/bold cyan] A presto.")
                 break
 
             risposta = self.gestisci_comando(comando)
-            print(f"{self.name}: {risposta}")
+            self.mostra_risposta(risposta)
