@@ -5,6 +5,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QIcon,
     QPalette,
     QTextBlockFormat,
     QTextCharFormat,
@@ -21,6 +22,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from core.percorsi import percorso_risorsa
 
 from .formattazione import converti_latex
 
@@ -276,8 +279,22 @@ def _tema_scuro():
     return palette
 
 
+def _imposta_identita_windows():
+    # Senza questo, avviando Raphael con "python" la barra delle applicazioni
+    # mostrerebbe l'icona di Python invece di quella di Raphael.
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "Raphael.Assistente"
+        )
+
+
 def avvia_finestra(raphael):
+    _imposta_identita_windows()
+
     applicazione = QApplication.instance() or QApplication(sys.argv)
+    applicazione.setWindowIcon(QIcon(str(percorso_risorsa("raphael.ico"))))
     applicazione.setStyle("Fusion")
     applicazione.setPalette(_tema_scuro())
     applicazione.setFont(QFont("Segoe UI", 11))

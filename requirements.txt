@@ -28,3 +28,4 @@ typing_extensions==4.16.0
 pylatexenc
 ddgs
 PySide6-Essentials
+pyinstaller
