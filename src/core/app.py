@@ -7,6 +7,7 @@ from rich.markdown import Markdown
 from ai.ollama_provider import OllamaProvider
 from ai.router import AIRouter
 from conversation.history import ConversationHistory
+from tools.pc_control import STRUMENTI_PC
 from tools.web_search import (
     cerca_sul_web,
     formatta_fonti,
@@ -43,6 +44,7 @@ class RaphaelApp:
                 model=config.OLLAMA_MODEL,
                 system_prompt=config.SYSTEM_PROMPT,
                 context_length=config.OLLAMA_CONTEXT_LENGTH,
+                strumenti=STRUMENTI_PC,
             )
 
         if ricerca_web is None:

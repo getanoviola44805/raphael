@@ -84,3 +84,88 @@ def test_stream_vuoto_avvisa_l_utente():
 
     assert len(pezzi) == 1
     assert "Non sono riuscito a generare una risposta" in pezzi[0]
+
+def chiamata_strumento(nome, argomenti):
+    yield {
+        "message": {
+            "content": "",
+            "tool_calls": [{"function": {"name": nome, "arguments": argomenti}}],
+        },
+        "done": False,
+    }
+    yield {"message": {"content": ""}, "done": True, "done_reason": "stop"}
+
+
+def test_stream_esegue_lo_strumento_richiesto_dal_modello():
+    aperti = []
+
+    def apri_programma(nome: str) -> str:
+        """Apre un programma.
+
+        Args:
+            nome: Il nome del programma.
+        """
+        aperti.append(nome)
+        return f"Ho aperto {nome}."
+
+    provider = OllamaProvider(strumenti=[apri_programma])
+
+    with patch(
+        "ai.ollama_provider.ollama.chat",
+        side_effect=[
+            chiamata_strumento("apri_programma", {"nome": "Chrome"}),
+            pezzi_finti("Fatto, ", "Chrome è aperto."),
+        ],
+    ) as chat_finto:
+        pezzi = list(provider.generate_response_stream("apri chrome"))
+
+    assert aperti == ["Chrome"]
+    assert "".join(pezzi).endswith("Fatto, Chrome è aperto.")
+    assert "Ho aperto Chrome." in "".join(pezzi)
+
+    secondo_giro = chat_finto.call_args_list[1].kwargs["messages"]
+    assert secondo_giro[-1] == {
+        "role": "tool",
+        "content": "Ho aperto Chrome.",
+        "tool_name": "apri_programma",
+    }
+    assert chat_finto.call_args_list[0].kwargs["tools"] == [apri_programma]
+
+
+def test_stream_gestisce_uno_strumento_sconosciuto():
+    provider = OllamaProvider(strumenti=[])
+
+    with patch(
+        "ai.ollama_provider.ollama.chat",
+        side_effect=[
+            chiamata_strumento("formatta_disco", {}),
+            pezzi_finti("Non posso farlo."),
+        ],
+    ):
+        pezzi = list(provider.generate_response_stream("formatta il disco"))
+
+    assert "non esiste" in "".join(pezzi)
+    assert "".join(pezzi).endswith("Non posso farlo.")
+
+
+def test_stream_riprova_senza_strumenti_se_il_modello_non_li_supporta():
+    import ollama as libreria_ollama
+
+    def data_e_ora() -> str:
+        """Restituisce la data."""
+        return "oggi"
+
+    def non_supportato():
+        raise libreria_ollama.ResponseError("model does not support tools", 400)
+        yield
+
+    provider = OllamaProvider(strumenti=[data_e_ora])
+
+    with patch(
+        "ai.ollama_provider.ollama.chat",
+        side_effect=[non_supportato(), pezzi_finti("Ciao!")],
+    ) as chat_finto:
+        pezzi = list(provider.generate_response_stream("ciao"))
+
+    assert pezzi == ["Ciao!"]
+    assert "tools" not in chat_finto.call_args_list[1].kwargs
