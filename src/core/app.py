@@ -106,6 +106,9 @@ class RaphaelApp:
 
         return f"{risposta}\n\n{formatta_fonti(risultati)}"
 
+    def salva_cronologia(self):
+        self.history.save_to_file(config.HISTORY_FILE)
+
     def mostra_risposta(self, risposta):
         self.console.print(f"[bold cyan]{self.name}:[/bold cyan]")
         self.console.print(Markdown(converti_latex(risposta)))
@@ -121,7 +124,7 @@ class RaphaelApp:
                 continue
 
             if comando.lower() in {"esci", "exit", "quit"}:
-                self.history.save_to_file(config.HISTORY_FILE)
+                self.salva_cronologia()
                 self.console.print(f"[bold cyan]{self.name}:[/bold cyan] A presto.")
                 break
 
