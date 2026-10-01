@@ -1,5 +1,6 @@
 import logging
-from collections.abc import Iterator
+import re
+from collections.abc import Callable, Iterator
 
 import httpx
 import ollama
@@ -19,34 +20,70 @@ MESSAGGIO_RISPOSTA_VUOTA = (
 )
 MAX_GIRI_STRUMENTI = 5
 
+INGRANAGGIO = "\u2699"  # ⚙
+# Le righe "⚙️ ..." le scrive il programma quando uno strumento è stato usato
+# davvero. Se il modello le rivede nella cronologia impara a scriverle da solo,
+# fingendo di aver fatto un'azione: per questo non gliele mostriamo mai.
+RIGA_STRUMENTO = re.compile(r"^[ \t]*\*?[ \t]*\u2699\ufe0f?.*(?:\n|$)", re.MULTILINE)
+
+
+def pulisci_risposta_precedente(testo: str) -> str:
+    """Toglie da una vecchia risposta le righe degli strumenti."""
+    pulito = RIGA_STRUMENTO.sub("", testo)
+    pulito = re.sub(r"\n{3,}", "\n\n", pulito).strip()
+    return pulito or "Fatto."
+
+
+def togli_ingranaggi(testo: str) -> str:
+    """Il simbolo ⚙️ può comparire solo quando uno strumento è stato usato davvero."""
+    return testo.replace(INGRANAGGIO + "\ufe0f", "").replace(INGRANAGGIO, "")
+
 
 class OllamaProvider(AIProvider):
     def __init__(
         self,
         model: str = "llama3.2",
-        system_prompt: str | None = None,
+        system_prompt: str | Callable[[], str] | None = None,
         context_length: int = 4096,
         strumenti: list | None = None,
+        osservatore_strumenti: Callable[[str, dict, str], None] | None = None,
     ):
         self.model = model
         self.system_prompt = system_prompt
         self.context_length = context_length
         self.strumenti = list(strumenti or [])
+        self.osservatore_strumenti = osservatore_strumenti
         self._strumenti_per_nome = {
             strumento.__name__: strumento for strumento in self.strumenti
         }
 
+    def _prompt_di_sistema(self) -> str | None:
+        # Il prompt può essere una funzione: così viene ricostruito a ogni
+        # domanda e include sempre i ricordi aggiornati.
+        if callable(self.system_prompt):
+            return self.system_prompt()
+
+        return self.system_prompt
+
     def _prepara_messaggi(self, prompt: str, history: list | None) -> list:
         if history:
             messages = [
-                {"role": messaggio["role"], "content": messaggio["content"]}
+                {
+                    "role": messaggio["role"],
+                    "content": (
+                        pulisci_risposta_precedente(messaggio["content"])
+                        if messaggio["role"] == "assistant"
+                        else messaggio["content"]
+                    ),
+                }
                 for messaggio in history
             ]
         else:
             messages = [{"role": "user", "content": prompt}]
 
-        if self.system_prompt:
-            messages.insert(0, {"role": "system", "content": self.system_prompt})
+        prompt_di_sistema = self._prompt_di_sistema()
+        if prompt_di_sistema:
+            messages.insert(0, {"role": "system", "content": prompt_di_sistema})
 
         return messages
 
@@ -67,9 +104,17 @@ class OllamaProvider(AIProvider):
         logger.info("Strumento: %s %s", nome, argomenti)
 
         try:
-            return str(strumento(**argomenti))
+            esito = str(strumento(**argomenti))
         except Exception as errore:
-            return f"Errore durante '{nome}': {errore}"
+            esito = f"Errore durante '{nome}': {errore}"
+
+        if self.osservatore_strumenti is not None:
+            try:
+                self.osservatore_strumenti(nome, argomenti, esito)
+            except Exception:
+                logger.exception("Osservatore degli strumenti fallito")
+
+        return esito
 
     def generate_response(self, prompt: str, history: list | None = None) -> str:
         try:
@@ -122,7 +167,7 @@ class OllamaProvider(AIProvider):
 
                 for pezzo in pezzi:
                     messaggio = pezzo["message"]
-                    testo = messaggio.get("content") or ""
+                    testo = togli_ingranaggi(messaggio.get("content") or "")
 
                     if testo:
                         testo_generato = True

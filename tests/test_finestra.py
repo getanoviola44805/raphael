@@ -1,12 +1,14 @@
 import time
 
 import pytest
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
 from ai.mock_provider import MockAIProvider
 from ai.provider import AIProvider
 from core.app import RaphaelApp
-from ui.finestra import FinestraRaphael, componi_markdown_chat
+from ui.componenti import MessaggioRaphael, MessaggioUtente
+from ui.finestra import LATO_MASSIMO_IMMAGINE, FinestraRaphael, salva_immagine_ridotta
 
 
 class ProviderAPezzi(AIProvider):
@@ -37,41 +39,12 @@ def aspetta_risposta(finestra, qapp, secondi=5):
         time.sleep(0.01)
 
 
-def test_componi_markdown_chat_mostra_i_messaggi():
-    messaggi = [
-        {"role": "user", "content": "ciao"},
-        {"role": "assistant", "content": "Ciao! Sono Raphael."},
-    ]
+def test_la_finestra_vuota_mostra_il_benvenuto(qapp):
+    raphael = RaphaelApp(ai_provider=MockAIProvider())
+    finestra = FinestraRaphael(raphael)
 
-    testo = componi_markdown_chat(messaggi, "Raphael")
-
-    assert "**Tu:** ciao" in testo
-    assert "**Raphael:**" in testo
-    assert "Ciao! Sono Raphael." in testo
-
-
-def test_componi_markdown_chat_converte_le_formule():
-    messaggi = [{"role": "assistant", "content": r"La formula è $\omega = 2\pi f$"}]
-
-    testo = componi_markdown_chat(messaggi, "Raphael")
-
-    assert "ω" in testo
-    assert "$" not in testo
-
-
-def test_componi_markdown_chat_indica_l_attesa():
-    testo = componi_markdown_chat([], "Raphael", in_attesa=True)
-
-    assert "sta scrivendo" in testo
-
-
-def test_componi_markdown_chat_mostra_la_risposta_parziale():
-    testo = componi_markdown_chat(
-        [], "Raphael", in_attesa=True, risposta_parziale="Sto scrivendo una ris"
-    )
-
-    assert "Sto scrivendo una ris" in testo
-    assert "sta scrivendo..." not in testo
+    assert not finestra.benvenuto.isHidden()
+    assert finestra.widget_messaggi() == []
 
 
 def test_la_finestra_mostra_la_cronologia(qapp):
@@ -80,9 +53,23 @@ def test_la_finestra_mostra_la_cronologia(qapp):
     raphael.history.add_message("assistant", "risposta vecchia")
 
     finestra = FinestraRaphael(raphael)
+    messaggi = finestra.widget_messaggi()
 
-    assert "messaggio vecchio" in finestra.chat.toPlainText()
-    assert "risposta vecchia" in finestra.chat.toPlainText()
+    assert isinstance(messaggi[0], MessaggioUtente)
+    assert isinstance(messaggi[1], MessaggioRaphael)
+    assert "messaggio vecchio" in finestra.testo_della_chat()
+    assert "risposta vecchia" in finestra.testo_della_chat()
+    assert finestra.benvenuto.isHidden()
+
+
+def test_le_risposte_mostrano_le_formule_senza_latex(qapp):
+    raphael = RaphaelApp(ai_provider=MockAIProvider())
+    raphael.history.add_message("assistant", r"La formula è $\omega = 2\pi f$")
+
+    finestra = FinestraRaphael(raphael)
+
+    assert "ω" in finestra.testo_della_chat()
+    assert "$" not in finestra.testo_della_chat()
 
 
 def test_la_finestra_invia_e_riceve(qapp):
@@ -94,8 +81,27 @@ def test_la_finestra_invia_e_riceve(qapp):
     aspetta_risposta(finestra, qapp)
 
     assert not finestra.in_attesa
-    assert "Ciao! Sono Raphael." in finestra.chat.toPlainText()
+    assert "Ciao! Sono Raphael." in finestra.testo_della_chat()
     assert finestra.casella.isEnabled()
+    assert finestra.casella.text() == ""
+    assert finestra.attesa.isHidden()
+
+
+def test_durante_l_attesa_gira_il_cerchio(qapp):
+    raphael = RaphaelApp(ai_provider=MockAIProvider())
+    finestra = FinestraRaphael(raphael)
+
+    finestra._imposta_attesa(True)
+
+    assert not finestra.attesa.isHidden()
+    assert finestra.attesa.cerchio.sta_girando()
+    assert "sta pensando" in finestra.stato.text()
+    assert not finestra.casella.isEnabled()
+
+    finestra._imposta_attesa(False)
+
+    assert finestra.attesa.isHidden()
+    assert not finestra.attesa.cerchio.sta_girando()
 
 
 def test_la_finestra_unisce_i_pezzi_della_risposta(qapp):
@@ -106,8 +112,28 @@ def test_la_finestra_unisce_i_pezzi_della_risposta(qapp):
     finestra.invia()
     aspetta_risposta(finestra, qapp)
 
-    assert "Prima parte, seconda parte." in finestra.chat.toPlainText()
+    assert "Prima parte, seconda parte." in finestra.testo_della_chat()
     assert finestra.messaggi[-1]["content"] == "Prima parte, seconda parte."
+    assert finestra.widget_messaggi()[-1].bottone_copia.isVisibleTo(finestra)
+
+
+def test_lo_streaming_aggiorna_solo_la_risposta_in_arrivo(qapp):
+    raphael = RaphaelApp(ai_provider=MockAIProvider())
+    raphael.history.add_message("user", "domanda vecchia")
+    raphael.history.add_message("assistant", "risposta vecchia")
+    finestra = FinestraRaphael(raphael)
+    vecchia = finestra.widget_messaggi()[1]
+
+    finestra._imposta_attesa(True)
+    for pezzo in ["Ecco:\n\n- uno\n", "- due\n\n", "## Titolo\n\n", "Fine."]:
+        finestra._ricevi_pezzo(pezzo)
+        finestra._aggiorna_se_serve()
+
+    in_arrivo = finestra.widget_messaggi()[-1]
+    assert in_arrivo is not vecchia
+    assert vecchia.testo_semplice() == "risposta vecchia"
+    assert in_arrivo.testo_semplice().rstrip().endswith("Fine.")
+    assert "- Ecco:" not in in_arrivo.testo.toMarkdown()
 
 
 def test_aggiornare_la_chat_non_sposta_chi_sta_rileggendo(qapp):
@@ -117,45 +143,73 @@ def test_aggiornare_la_chat_non_sposta_chi_sta_rileggendo(qapp):
         raphael.history.add_message("assistant", "risposta lunga\n\n" * 5)
 
     finestra = FinestraRaphael(raphael)
-    finestra.resize(600, 300)
+    finestra.resize(600, 400)
     finestra.show()
-    qapp.processEvents()
+    for _ in range(5):
+        qapp.processEvents()
 
-    barra = finestra.chat.verticalScrollBar()
+    barra = finestra.area.verticalScrollBar()
     barra.setValue(barra.maximum() // 2)
     posizione = barra.value()
 
-    finestra.risposta_parziale = "nuovo testo"
-    finestra._aggiorna_chat()
+    finestra._imposta_attesa(True)
+    finestra._ricevi_pezzo("nuovo testo\n\n" * 10)
+    finestra._aggiorna_se_serve()
+    qapp.processEvents()
 
     assert barra.value() == posizione
+    finestra._imposta_attesa(False)
 
 
-def test_lo_streaming_aggiorna_solo_la_risposta_in_arrivo(qapp):
+def test_la_chat_segue_la_risposta_se_si_e_in_fondo(qapp):
     raphael = RaphaelApp(ai_provider=MockAIProvider())
-    raphael.history.add_message("user", "domanda vecchia")
-    raphael.history.add_message("assistant", "risposta vecchia")
+    for numero in range(10):
+        raphael.history.add_message("user", f"domanda {numero}")
+        raphael.history.add_message("assistant", "risposta\n\n" * 5)
+
+    finestra = FinestraRaphael(raphael)
+    finestra.resize(600, 400)
+    finestra.show()
+    qapp.processEvents()
+    finestra.vai_in_fondo()
+
+    finestra._imposta_attesa(True)
+    finestra._ricevi_pezzo("riga\n\n" * 30)
+    finestra._aggiorna_se_serve()
+    for _ in range(5):
+        qapp.processEvents()
+
+    barra = finestra.area.verticalScrollBar()
+    assert barra.value() == barra.maximum()
+    finestra._imposta_attesa(False)
+
+
+def test_invio_con_il_tasto_e_a_capo_con_maiuscolo(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    raphael = RaphaelApp(ai_provider=MockAIProvider())
     finestra = FinestraRaphael(raphael)
 
-    finestra.messaggi.append({"role": "user", "content": "domanda nuova"})
-    finestra._imposta_attesa(True)
-    finestra._prepara_risposta_in_arrivo()
-    assert "sta scrivendo" in finestra.chat.toPlainText()
+    finestra.casella.setText("prima riga")
+    QTest.keyClick(finestra.casella, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    QTest.keyClicks(finestra.casella, "seconda riga")
+    assert finestra.casella.text() == "prima riga\nseconda riga"
 
-    for pezzo in ["Ecco:\n\n- uno\n", "- due\n\n", "## Titolo\n\n", "Fine."]:
-        finestra._ricevi_pezzo(pezzo)
-        finestra._aggiorna_se_serve()
+    QTest.keyClick(finestra.casella, Qt.Key.Key_Return)
+    aspetta_risposta(finestra, qapp)
 
-    testo = finestra.chat.toPlainText()
-    assert "risposta vecchia" in testo
-    assert "domanda nuova" in testo
-    assert "sta scrivendo" not in testo
-    assert testo.rstrip().endswith("Fine.")
-    assert "- Ecco:" not in finestra.chat.toMarkdown()
+    assert finestra.messaggi[0]["content"] == "prima riga\nseconda riga"
 
-from PySide6.QtGui import QColor, QImage
 
-from ui.finestra import LATO_MASSIMO_IMMAGINE, salva_immagine_ridotta
+def test_il_tasto_copia_copia_la_risposta(qapp):
+    raphael = RaphaelApp(ai_provider=MockAIProvider())
+    raphael.history.add_message("assistant", "**Testo** da copiare")
+    finestra = FinestraRaphael(raphael)
+
+    finestra.widget_messaggi()[0].copia()
+
+    assert QApplication.clipboard().text() == "**Testo** da copiare"
 
 
 class ProviderCheRegistra(AIProvider):
@@ -212,6 +266,8 @@ def test_invio_di_un_immagine_senza_testo(qapp, tmp_path):
     finestra.allega_immagine(immagine_di_prova(100, 100), "esercizio")
     allegato = finestra.allegato
     assert "esercizio" in finestra.etichetta_allegato.text()
+    assert not finestra.chip_allegato.isHidden()
+    assert not finestra.miniatura.pixmap().isNull()
 
     finestra.invia()
     aspetta_risposta(finestra, qapp)
@@ -231,6 +287,7 @@ def test_togli_allegato(qapp, tmp_path):
 
     assert finestra.allegato is None
     assert finestra.etichetta_allegato.text() == ""
+    assert finestra.chip_allegato.isHidden()
 
 
 def test_ctrl_v_con_un_immagine_negli_appunti_la_allega(qapp, tmp_path):
