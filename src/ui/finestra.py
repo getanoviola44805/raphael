@@ -4,41 +4,45 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import (
-    QColor,
-    QFont,
-    QIcon,
-    QImage,
-    QKeySequence,
-    QPalette,
-    QTextBlockFormat,
-    QTextCharFormat,
-    QTextCursor,
-)
+from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
-    QTextBrowser,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from core import config
+from core.azioni import RISCHIO_ALTO
 from core.percorsi import percorso_risorsa
 
-from .formattazione import converti_latex
+from . import stile
+from .componenti import (
+    CasellaTesto,
+    MessaggioRaphael,
+    MessaggioUtente,
+    RigaAttesa,
+    Sfera,
+    bottone_icona,
+    carattere_interfaccia,
+)
 
 
 MESSAGGI_MOSTRATI_ALL_AVVIO = 20
 INTERVALLO_AGGIORNAMENTO_MS = 100
 LATO_MASSIMO_IMMAGINE = 1600
+LATO_MINIATURA = 40
 FILTRO_IMMAGINI = "Immagini (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 DOMANDA_PREDEFINITA_IMMAGINE = "Descrivi questa immagine."
+TEMPO_MASSIMO_CONFERMA_S = 300
+DISTANZA_DAL_FONDO = 40
 
 
 def salva_immagine_ridotta(immagine: QImage, cartella: Path, nome_base: str) -> Path:
@@ -62,30 +66,38 @@ def salva_immagine_ridotta(immagine: QImage, cartella: Path, nome_base: str) -> 
     return percorso
 
 
-def componi_markdown_chat(
-    messaggi, nome_assistente, in_attesa=False, risposta_parziale=""
-):
-    blocchi = []
+class RichiestaConferma:
+    """Una domanda di conferma che passa dal thread del modello alla finestra."""
 
-    for messaggio in messaggi:
-        if messaggio["role"] == "user":
-            blocchi.append(f"**Tu:** {messaggio['content']}")
-        else:
-            testo = converti_latex(messaggio["content"])
-            blocchi.append(f"**{nome_assistente}:**\n\n{testo}")
+    def __init__(self, azione):
+        self.azione = azione
+        self.evento = threading.Event()
+        self.confermata = False
 
-    if risposta_parziale:
-        testo = converti_latex(risposta_parziale)
-        blocchi.append(f"**{nome_assistente}:**\n\n{testo}")
-    elif in_attesa:
-        blocchi.append(f"*{nome_assistente} sta scrivendo...*")
-
-    return "\n\n---\n\n".join(blocchi)
+    def rispondi(self, confermata):
+        if self.evento.is_set():
+            return
+        self.confermata = bool(confermata)
+        self.evento.set()
 
 
 class _Segnali(QObject):
     pezzo_ricevuto = Signal(str)
     risposta_completata = Signal()
+    conferma_richiesta = Signal(object)
+    conferma_scaduta = Signal(object)
+
+
+def _centrato(widget):
+    """Mette un widget al centro, con una larghezza massima comoda da leggere."""
+    widget.setMaximumWidth(stile.LARGHEZZA_COLONNA)
+    contenitore = QWidget()
+    layout = QHBoxLayout(contenitore)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addStretch(1)
+    layout.addWidget(widget, 100)
+    layout.addStretch(1)
+    return contenitore
 
 
 class FinestraRaphael(QMainWindow):
@@ -103,82 +115,231 @@ class FinestraRaphael(QMainWindow):
         self.in_attesa = False
         self.risposta_parziale = ""
         self._da_aggiornare = False
-        self._inizio_risposta = None
+        self._risposta_in_arrivo = None
+        self._segui_il_fondo = True
+        self.richiesta_conferma = None
 
         self.segnali = _Segnali()
         self.segnali.pezzo_ricevuto.connect(self._ricevi_pezzo)
         self.segnali.risposta_completata.connect(self._completa_risposta)
+        self.segnali.conferma_richiesta.connect(self._mostra_conferma)
+        self.segnali.conferma_scaduta.connect(self._conferma_scaduta)
 
         self.timer_aggiornamento = QTimer(self)
         self.timer_aggiornamento.setInterval(INTERVALLO_AGGIORNAMENTO_MS)
         self.timer_aggiornamento.timeout.connect(self._aggiorna_se_serve)
 
-        self.setWindowTitle(f"{raphael.name} {raphael.version}")
-        self.resize(900, 700)
+        self.setWindowTitle(raphael.name)
+        self.resize(980, 760)
+        self.setPalette(stile.tavolozza_scura())
+        self.setStyleSheet(stile.FOGLIO_DI_STILE)
 
-        self.chat = QTextBrowser()
-        self.chat.setOpenExternalLinks(True)
-        self.chat.document().setDocumentMargin(12)
+        sfondo = QWidget()
+        sfondo.setObjectName("sfondo")
+        layout = QVBoxLayout(sfondo)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._crea_area_chat(), 1)
+        layout.addWidget(self._crea_zona_scrittura())
+        self.setCentralWidget(sfondo)
 
-        self.stato = QLabel("")
+        for messaggio in self.messaggi:
+            self._aggiungi_messaggio(messaggio["role"], messaggio["content"])
+        self._aggiorna_benvenuto()
 
-        self.casella = QLineEdit()
-        self.casella.setPlaceholderText(
-            "Scrivi un messaggio... (usa /cerca per cercare sul web)"
+        self._mostra_allegato()
+        self.casella.setFocus()
+
+        # Da qui in poi è la finestra a chiedere conferma delle azioni a rischio.
+        if hasattr(raphael, "azioni"):
+            raphael.azioni.chiedi_conferma = self.chiedi_conferma
+
+    # ------------------------------------------------------- costruzione
+
+    def _crea_area_chat(self):
+        self.colonna = QWidget()
+        self.layout_colonna = QVBoxLayout(self.colonna)
+        self.layout_colonna.setContentsMargins(24, 28, 24, 12)
+        self.layout_colonna.setSpacing(26)
+
+        self.benvenuto = self._crea_benvenuto()
+        self.attesa = RigaAttesa()
+        self.stato = self.attesa.etichetta
+
+        self.layout_colonna.addWidget(self.benvenuto)
+        self.layout_colonna.addWidget(self.attesa)
+        self.layout_colonna.addStretch(1)
+
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.Shape.NoFrame)
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.area.setWidget(_centrato(self.colonna))
+
+        barra = self.area.verticalScrollBar()
+        barra.valueChanged.connect(self._ricorda_se_in_fondo)
+        barra.rangeChanged.connect(self._resta_in_fondo)
+        return self.area
+
+    def _crea_benvenuto(self):
+        benvenuto = QWidget()
+        layout = QVBoxLayout(benvenuto)
+        layout.setContentsMargins(0, 120, 0, 0)
+        layout.setSpacing(14)
+
+        sfera = Sfera(56)
+        titolo = QLabel("Ciao! Come posso aiutarti?")
+        titolo.setObjectName("benvenuto")
+        sottotitolo = QLabel(
+            "Chiedimi qualsiasi cosa, fammi leggere un file, aprire un programma "
+            "o cercare sul web."
         )
-        self.casella.returnPressed.connect(self.invia)
+        sottotitolo.setObjectName("sottotitolo")
+        sottotitolo.setWordWrap(True)
+        sottotitolo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        layout.addWidget(sfera, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(titolo, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(sottotitolo)
+        return benvenuto
+
+    def _crea_zona_scrittura(self):
+        colonna = QWidget()
+        layout = QVBoxLayout(colonna)
+        layout.setContentsMargins(24, 6, 24, 14)
+        layout.setSpacing(10)
+
+        self._crea_barra_conferma()
+        layout.addWidget(self.barra_conferma)
+        layout.addWidget(self._crea_casella_scrittura())
+
+        nota = QLabel("Raphael può sbagliare: controlla le informazioni importanti.")
+        nota.setObjectName("sottotitolo")
+        nota.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        nota.setStyleSheet(f"color: {stile.TESTO_DEBOLE}; font-size: 9pt;")
+        layout.addWidget(nota)
+
+        return _centrato(colonna)
+
+    def _crea_casella_scrittura(self):
+        self.casella_scrittura = QFrame()
+        self.casella_scrittura.setObjectName("casellaScrittura")
+
+        # Il chip dell'immagine allegata, con miniatura e ✕.
+        self.chip_allegato = QFrame()
+        self.chip_allegato.setObjectName("chipAllegato")
+        self.miniatura = QLabel()
+        self.miniatura.setFixedSize(LATO_MINIATURA, LATO_MINIATURA)
+        self.etichetta_allegato = QLabel("")
+        self.bottone_togli_allegato = QPushButton("✕")
+        self.bottone_togli_allegato.setObjectName("bottoneTogli")
+        self.bottone_togli_allegato.setFixedSize(22, 22)
+        self.bottone_togli_allegato.setToolTip("Togli l'immagine allegata")
+        self.bottone_togli_allegato.clicked.connect(self.togli_allegato)
+        riga_chip = QHBoxLayout(self.chip_allegato)
+        riga_chip.setContentsMargins(6, 6, 6, 6)
+        riga_chip.setSpacing(8)
+        riga_chip.addWidget(self.miniatura)
+        riga_chip.addWidget(self.etichetta_allegato)
+        riga_chip.addWidget(self.bottone_togli_allegato)
+
+        riga_allegato = QHBoxLayout()
+        riga_allegato.setContentsMargins(0, 0, 0, 0)
+        riga_allegato.addWidget(self.chip_allegato)
+        riga_allegato.addStretch(1)
+
+        self.casella = CasellaTesto()
+        self.casella.setPlaceholderText(
+            "Scrivi a Raphael...   (/cerca per il web, /memoria per i ricordi, "
+            "/registro per le azioni)"
+        )
+        self.casella.invio_premuto.connect(self.invia)
         self.casella.installEventFilter(self)
 
-        self.bottone = QPushButton("Invia")
-        self.bottone.clicked.connect(self.invia)
-
-        self.bottone_allega = QPushButton("📎")
-        self.bottone_allega.setFixedWidth(40)
-        self.bottone_allega.setToolTip(
-            "Allega un'immagine (puoi anche incollarla con Ctrl+V)"
+        self.bottone_allega = bottone_icona(
+            "📎", "Allega un'immagine (puoi anche incollarla con Ctrl+V)"
         )
         self.bottone_allega.clicked.connect(self.scegli_immagine)
 
         self.bottone_ragiona = QPushButton("🧠 Ragiona")
+        self.bottone_ragiona.setObjectName("bottoneRagiona")
         self.bottone_ragiona.setCheckable(True)
-        self.bottone_ragiona.setStyleSheet(
-            "QPushButton:checked { background-color: #3d7bd9; color: white; }"
-        )
+        self.bottone_ragiona.setFixedHeight(30)
+        self.bottone_ragiona.setCursor(Qt.CursorShape.PointingHandCursor)
         self.bottone_ragiona.setToolTip(
             "Il modello ragiona passo passo prima di rispondere: "
             "più lento, ma più preciso su matematica, fisica ed esercizi"
         )
 
-        self.etichetta_allegato = QLabel("")
-        self.bottone_togli_allegato = QPushButton("✕")
-        self.bottone_togli_allegato.setFixedWidth(28)
-        self.bottone_togli_allegato.setToolTip("Togli l'immagine allegata")
-        self.bottone_togli_allegato.clicked.connect(self.togli_allegato)
+        self.bottone = QPushButton("↑")
+        self.bottone.setObjectName("bottoneInvia")
+        self.bottone.setFixedSize(34, 34)
+        self.bottone.setToolTip("Invia (Invio). Per andare a capo: Maiusc+Invio")
+        self.bottone.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.bottone.clicked.connect(self.invia)
 
-        riga_allegato = QHBoxLayout()
-        riga_allegato.addWidget(self.etichetta_allegato)
-        riga_allegato.addWidget(self.bottone_togli_allegato)
-        riga_allegato.addStretch()
+        riga_strumenti = QHBoxLayout()
+        riga_strumenti.setContentsMargins(0, 0, 0, 0)
+        riga_strumenti.setSpacing(6)
+        riga_strumenti.addWidget(self.bottone_allega)
+        riga_strumenti.addWidget(self.bottone_ragiona)
+        riga_strumenti.addStretch(1)
+        riga_strumenti.addWidget(self.bottone)
 
-        riga_input = QHBoxLayout()
-        riga_input.addWidget(self.bottone_allega)
-        riga_input.addWidget(self.casella)
-        riga_input.addWidget(self.bottone_ragiona)
-        riga_input.addWidget(self.bottone)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.chat)
-        layout.addWidget(self.stato)
+        layout = QVBoxLayout(self.casella_scrittura)
+        layout.setContentsMargins(16, 12, 10, 10)
+        layout.setSpacing(8)
         layout.addLayout(riga_allegato)
-        layout.addLayout(riga_input)
+        layout.addWidget(self.casella)
+        layout.addLayout(riga_strumenti)
+        return self.casella_scrittura
 
-        contenitore = QWidget()
-        contenitore.setLayout(layout)
-        self.setCentralWidget(contenitore)
+    # ---------------------------------------------------------- messaggi
 
-        self._mostra_allegato()
-        self._aggiorna_chat(forza_scorrimento=True)
-        self.casella.setFocus()
+    def _aggiungi_widget(self, widget):
+        # I messaggi vanno prima della riga d'attesa e dello spazio finale.
+        posizione = self.layout_colonna.indexOf(self.attesa)
+        self.layout_colonna.insertWidget(posizione, widget)
+
+    def _aggiungi_messaggio(self, ruolo, testo):
+        if ruolo == "user":
+            widget = MessaggioUtente(testo)
+        else:
+            widget = MessaggioRaphael(self.raphael.name, testo)
+        self._aggiungi_widget(widget)
+        return widget
+
+    def _aggiorna_benvenuto(self):
+        vuota = not self.messaggi and self._risposta_in_arrivo is None
+        self.benvenuto.setVisible(vuota and not self.in_attesa)
+
+    def widget_messaggi(self):
+        widget = []
+        for indice in range(self.layout_colonna.count()):
+            elemento = self.layout_colonna.itemAt(indice).widget()
+            if isinstance(elemento, (MessaggioUtente, MessaggioRaphael)):
+                widget.append(elemento)
+        return widget
+
+    def testo_della_chat(self):
+        return "\n\n".join(widget.testo_semplice() for widget in self.widget_messaggi())
+
+    def _ricorda_se_in_fondo(self, valore):
+        barra = self.area.verticalScrollBar()
+        self._segui_il_fondo = valore >= barra.maximum() - DISTANZA_DAL_FONDO
+
+    def _resta_in_fondo(self, minimo, massimo):
+        # Quando la chat cresce, la segue solo se l'utente era già in fondo:
+        # chi sta rileggendo un messaggio vecchio non viene spostato.
+        if self._segui_il_fondo:
+            self.area.verticalScrollBar().setValue(massimo)
+
+    def vai_in_fondo(self):
+        self._segui_il_fondo = True
+        barra = self.area.verticalScrollBar()
+        barra.setValue(barra.maximum())
+
+    # ----------------------------------------------------------- allegati
 
     def eventFilter(self, oggetto, evento):
         # Ctrl+V nella casella: se negli appunti c'è un'immagine (per esempio
@@ -194,6 +355,15 @@ class FinestraRaphael(QMainWindow):
                 self.allega_immagine(immagine, "incollata")
                 return True
 
+        if oggetto is self.casella and evento.type() in (
+            QEvent.Type.FocusIn,
+            QEvent.Type.FocusOut,
+        ):
+            attiva = evento.type() == QEvent.Type.FocusIn
+            self.casella_scrittura.setProperty("attiva", attiva)
+            self.casella_scrittura.style().unpolish(self.casella_scrittura)
+            self.casella_scrittura.style().polish(self.casella_scrittura)
+
         return super().eventFilter(oggetto, evento)
 
     def scegli_immagine(self):
@@ -207,7 +377,7 @@ class FinestraRaphael(QMainWindow):
         immagine = QImage(percorso)
 
         if immagine.isNull():
-            self.stato.setText("⚠️ Non riesco a leggere questa immagine.")
+            QMessageBox.warning(self, self.raphael.name, "Non riesco a leggere questa immagine.")
             return
 
         self.allega_immagine(immagine, Path(percorso).stem)
@@ -218,6 +388,7 @@ class FinestraRaphael(QMainWindow):
         )
         self.nome_allegato = nome_base
         self._mostra_allegato()
+        self.casella.setFocus()
 
     def togli_allegato(self):
         self.allegato = None
@@ -226,12 +397,21 @@ class FinestraRaphael(QMainWindow):
     def _mostra_allegato(self):
         if self.allegato is None:
             self.etichetta_allegato.setText("")
-            self.etichetta_allegato.hide()
-            self.bottone_togli_allegato.hide()
-        else:
-            self.etichetta_allegato.setText(f"🖼️ {self.nome_allegato}")
-            self.etichetta_allegato.show()
-            self.bottone_togli_allegato.show()
+            self.miniatura.clear()
+            self.chip_allegato.hide()
+            return
+
+        miniatura = QPixmap(str(self.allegato)).scaled(
+            LATO_MINIATURA,
+            LATO_MINIATURA,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.miniatura.setPixmap(miniatura)
+        self.etichetta_allegato.setText(f"🖼️ {self.nome_allegato}")
+        self.chip_allegato.show()
+
+    # ------------------------------------------------------------- invio
 
     def invia(self):
         testo = self.casella.text().strip()
@@ -252,9 +432,12 @@ class FinestraRaphael(QMainWindow):
         self.casella.clear()
         self.togli_allegato()
         self.messaggi.append({"role": "user", "content": testo_mostrato})
+        self._aggiungi_messaggio("user", testo_mostrato)
+
         self.risposta_parziale = ""
+        self._risposta_in_arrivo = None
         self._imposta_attesa(True, ragiona)
-        self._prepara_risposta_in_arrivo()
+        self.vai_in_fondo()
         self.timer_aggiornamento.start()
 
         lavoro = threading.Thread(
@@ -287,76 +470,36 @@ class FinestraRaphael(QMainWindow):
             self._da_aggiornare = False
             self._aggiorna_risposta_in_arrivo()
 
-    def _prepara_risposta_in_arrivo(self):
-        # Disegna una sola volta i messaggi precedenti e l'intestazione della
-        # risposta: durante lo streaming verrà aggiornata solo la parte finale.
-        precedenti = componi_markdown_chat(self.messaggi, self.raphael.name)
-        intestazione = f"**{self.raphael.name}:**"
-
-        if precedenti:
-            testo = f"{precedenti}\n\n---\n\n{intestazione}"
-        else:
-            testo = intestazione
-
-        self.chat.setMarkdown(testo)
-
-        cursore = QTextCursor(self.chat.document())
-        cursore.movePosition(QTextCursor.MoveOperation.End)
-        cursore.insertBlock(QTextBlockFormat(), QTextCharFormat())
-        self._inizio_risposta = cursore.position()
-
-        self._sostituisci_risposta(f"*{self.raphael.name} sta scrivendo...*")
-
-        barra = self.chat.verticalScrollBar()
-        barra.setValue(barra.maximum())
-
     def _aggiorna_risposta_in_arrivo(self):
-        if self._inizio_risposta is None:
+        if not self.risposta_parziale.strip():
             return
 
-        barra = self.chat.verticalScrollBar()
-        posizione = barra.value()
-        era_in_fondo = posizione >= barra.maximum() - 20
+        if self._risposta_in_arrivo is None:
+            self._risposta_in_arrivo = MessaggioRaphael(self.raphael.name)
+            self._aggiungi_widget(self._risposta_in_arrivo)
+            self._aggiorna_benvenuto()
+            if not self.richiesta_conferma:
+                self.stato.setText(f"{self.raphael.name} sta scrivendo...")
 
-        self.chat.setUpdatesEnabled(False)
-        self._sostituisci_risposta(converti_latex(self.risposta_parziale))
-
-        if era_in_fondo:
-            barra.setValue(barra.maximum())
-        else:
-            barra.setValue(posizione)
-
-        self.chat.setUpdatesEnabled(True)
-
-    def _sostituisci_risposta(self, markdown):
-        cursore = QTextCursor(self.chat.document())
-        cursore.setPosition(self._inizio_risposta)
-        cursore.movePosition(
-            QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor
-        )
-        cursore.removeSelectedText()
-
-        # Toglie la formattazione rimasta dall'aggiornamento precedente
-        # (elenchi, titoli...), così il nuovo testo riparte da zero.
-        elenco = cursore.currentList()
-        if elenco is not None:
-            elenco.remove(cursore.block())
-        cursore.setBlockFormat(QTextBlockFormat())
-        cursore.setBlockCharFormat(QTextCharFormat())
-        cursore.setCharFormat(QTextCharFormat())
-
-        cursore.insertMarkdown(markdown)
+        # Si aggiorna solo il messaggio in arrivo: il resto della chat non
+        # viene ridisegnato, quindi lo streaming resta fluido.
+        self._risposta_in_arrivo.imposta_testo(self.risposta_parziale)
 
     def _completa_risposta(self):
         self.timer_aggiornamento.stop()
-        self.messaggi.append(
-            {"role": "assistant", "content": self.risposta_parziale}
-        )
-        self.risposta_parziale = ""
         self._da_aggiornare = False
-        self._inizio_risposta = None
+
+        if self._risposta_in_arrivo is None:
+            self._risposta_in_arrivo = MessaggioRaphael(self.raphael.name)
+            self._aggiungi_widget(self._risposta_in_arrivo)
+
+        self._risposta_in_arrivo.imposta_testo(self.risposta_parziale)
+        self._risposta_in_arrivo.completa()
+        self.messaggi.append({"role": "assistant", "content": self.risposta_parziale})
+
+        self.risposta_parziale = ""
+        self._risposta_in_arrivo = None
         self._imposta_attesa(False)
-        self._aggiorna_chat()
         self.raphael.salva_cronologia()
 
     def _imposta_attesa(self, attesa, ragiona=False):
@@ -371,62 +514,133 @@ class FinestraRaphael(QMainWindow):
             controllo.setEnabled(not attesa)
 
         if not attesa:
-            self.stato.setText("")
+            self.attesa.nascondi()
+            self.casella.setFocus()
         elif ragiona:
-            self.stato.setText(
+            self.attesa.mostra(
                 f"{self.raphael.name} sta ragionando... "
                 "(con il ragionamento attivo può volerci qualche minuto)"
             )
         else:
-            self.stato.setText(f"{self.raphael.name} sta pensando...")
+            self.attesa.mostra(f"{self.raphael.name} sta pensando...")
 
-        if not attesa:
-            self.casella.setFocus()
+        self._aggiorna_benvenuto()
 
-    def _aggiorna_chat(self, forza_scorrimento=False):
-        barra = self.chat.verticalScrollBar()
-        posizione = barra.value()
-        era_in_fondo = posizione >= barra.maximum() - 20
+    # ------------------------------------------------------------ conferma
 
-        # Ridisegna tutto in un colpo solo: senza questa accortezza la finestra
-        # mostrerebbe per un istante la chat tornata in cima, causando uno scatto.
-        self.chat.setUpdatesEnabled(False)
+    def _crea_barra_conferma(self):
+        self.barra_conferma = QFrame()
+        self.barra_conferma.setObjectName("barraConferma")
 
-        self.chat.setMarkdown(
-            componi_markdown_chat(
-                self.messaggi,
-                self.raphael.name,
-                self.in_attesa,
-                self.risposta_parziale,
-            )
+        self.titolo_conferma = QLabel("")
+        self.titolo_conferma.setObjectName("titoloConferma")
+        self.testo_conferma = QLabel("")
+        self.testo_conferma.setWordWrap(True)
+        self.testo_conferma.setTextFormat(Qt.TextFormat.PlainText)
+        self.testo_conferma.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self.dettagli_conferma = QLabel("")
+        self.dettagli_conferma.setObjectName("dettagliConferma")
+        self.dettagli_conferma.setWordWrap(True)
+        self.dettagli_conferma.setTextFormat(Qt.TextFormat.PlainText)
 
-        if forza_scorrimento or era_in_fondo:
-            barra.setValue(barra.maximum())
+        self.bottone_conferma = QPushButton("✔ Conferma")
+        self.bottone_conferma.setObjectName("bottoneConferma")
+        self.bottone_conferma.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.bottone_conferma.clicked.connect(lambda: self._rispondi_conferma(True))
+
+        self.bottone_rifiuta = QPushButton("✕ Annulla")
+        self.bottone_rifiuta.setObjectName("bottoneRifiuta")
+        self.bottone_rifiuta.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.bottone_rifiuta.clicked.connect(lambda: self._rispondi_conferma(False))
+
+        for bottone in (self.bottone_conferma, self.bottone_rifiuta):
+            bottone.setFixedHeight(32)
+
+        intestazione = QHBoxLayout()
+        intestazione.setSpacing(10)
+        intestazione.addWidget(Sfera(20))
+        intestazione.addWidget(self.titolo_conferma, 1)
+
+        riga_bottoni = QHBoxLayout()
+        riga_bottoni.addStretch(1)
+        riga_bottoni.addWidget(self.bottone_rifiuta)
+        riga_bottoni.addWidget(self.bottone_conferma)
+
+        layout = QVBoxLayout(self.barra_conferma)
+        layout.setContentsMargins(16, 14, 14, 12)
+        layout.setSpacing(6)
+        layout.addLayout(intestazione)
+        layout.addWidget(self.testo_conferma)
+        layout.addWidget(self.dettagli_conferma)
+        layout.addLayout(riga_bottoni)
+        self.barra_conferma.hide()
+
+    def chiedi_conferma(self, azione):
+        """Chiamata dal thread del modello: aspetta che l'utente risponda."""
+        if threading.current_thread() is threading.main_thread():
+            # Dal thread della finestra non si può aspettare un clic sulla
+            # finestra stessa: in questo raro caso si usa una finestrella.
+            risposta = QMessageBox.question(
+                self, self.raphael.name, f"{azione.descrizione}\n\nConfermi?"
+            )
+            return risposta == QMessageBox.StandardButton.Yes
+
+        richiesta = RichiestaConferma(azione)
+        self.segnali.conferma_richiesta.emit(richiesta)
+
+        if not richiesta.evento.wait(TEMPO_MASSIMO_CONFERMA_S):
+            richiesta.rispondi(False)
+            self.segnali.conferma_scaduta.emit(richiesta)
+
+        return richiesta.confermata
+
+    def _mostra_conferma(self, richiesta):
+        self.richiesta_conferma = richiesta
+        azione = richiesta.azione
+        delicata = azione.rischio == RISCHIO_ALTO
+
+        if delicata:
+            self.titolo_conferma.setText("⚠️ Azione delicata: controlla bene")
         else:
-            barra.setValue(posizione)
+            self.titolo_conferma.setText(f"{self.raphael.name} vuole fare questa azione")
 
-        self.chat.setUpdatesEnabled(True)
+        self.barra_conferma.setProperty("delicata", delicata)
+        self.barra_conferma.style().unpolish(self.barra_conferma)
+        self.barra_conferma.style().polish(self.barra_conferma)
+
+        self.testo_conferma.setText(azione.descrizione)
+        self.dettagli_conferma.setText(azione.dettagli)
+        self.dettagli_conferma.setVisible(bool(azione.dettagli))
+        self.barra_conferma.show()
+        self.bottone_rifiuta.setFocus()
+        self.attesa.mostra("Aspetto la tua conferma...")
+        QApplication.alert(self)
+
+    def _rispondi_conferma(self, confermata):
+        richiesta = self.richiesta_conferma
+        if richiesta is None:
+            return
+
+        self._chiudi_barra_conferma()
+        richiesta.rispondi(confermata)
+
+    def _conferma_scaduta(self, richiesta):
+        if self.richiesta_conferma is richiesta:
+            self._chiudi_barra_conferma()
+
+    def _chiudi_barra_conferma(self):
+        self.richiesta_conferma = None
+        self.barra_conferma.hide()
+        if self.in_attesa:
+            self.attesa.mostra(f"{self.raphael.name} sta pensando...")
 
     def closeEvent(self, evento):
+        if self.richiesta_conferma is not None:
+            self.richiesta_conferma.rispondi(False)
         self.raphael.salva_cronologia()
         super().closeEvent(evento)
-
-
-def _tema_scuro():
-    palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window, QColor("#1e1f22"))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor("#e6e6e6"))
-    palette.setColor(QPalette.ColorRole.Base, QColor("#26282c"))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#2e3035"))
-    palette.setColor(QPalette.ColorRole.Text, QColor("#e6e6e6"))
-    palette.setColor(QPalette.ColorRole.Button, QColor("#2e3035"))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor("#e6e6e6"))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor("#3d7bd9"))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-    palette.setColor(QPalette.ColorRole.Link, QColor("#6cb4ff"))
-    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#8a8f98"))
-    return palette
 
 
 def _imposta_identita_windows():
@@ -446,10 +660,11 @@ def avvia_finestra(raphael):
     applicazione = QApplication.instance() or QApplication(sys.argv)
     applicazione.setWindowIcon(QIcon(str(percorso_risorsa("raphael.ico"))))
     applicazione.setStyle("Fusion")
-    applicazione.setPalette(_tema_scuro())
-    applicazione.setFont(QFont("Segoe UI", 11))
+    applicazione.setPalette(stile.tavolozza_scura())
+    applicazione.setFont(carattere_interfaccia())
 
     finestra = FinestraRaphael(raphael)
     finestra.show()
+    stile.barra_del_titolo_scura(finestra)
 
     return applicazione.exec()
