@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -43,6 +44,7 @@ FILTRO_IMMAGINI = "Immagini (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 DOMANDA_PREDEFINITA_IMMAGINE = "Descrivi questa immagine."
 TEMPO_MASSIMO_CONFERMA_S = 300
 DISTANZA_DAL_FONDO = 40
+DURATA_NOTIFICA_MS = 8000
 
 
 def salva_immagine_ridotta(immagine: QImage, cartella: Path, nome_base: str) -> Path:
@@ -86,6 +88,7 @@ class _Segnali(QObject):
     risposta_completata = Signal()
     conferma_richiesta = Signal(object)
     conferma_scaduta = Signal(object)
+    promemoria_arrivato = Signal(object)
 
 
 def _centrato(widget):
@@ -124,6 +127,7 @@ class FinestraRaphael(QMainWindow):
         self.segnali.risposta_completata.connect(self._completa_risposta)
         self.segnali.conferma_richiesta.connect(self._mostra_conferma)
         self.segnali.conferma_scaduta.connect(self._conferma_scaduta)
+        self.segnali.promemoria_arrivato.connect(self._mostra_notifica_promemoria)
 
         self.timer_aggiornamento = QTimer(self)
         self.timer_aggiornamento.setInterval(INTERVALLO_AGGIORNAMENTO_MS)
@@ -133,6 +137,10 @@ class FinestraRaphael(QMainWindow):
         self.resize(980, 760)
         self.setPalette(stile.tavolozza_scura())
         self.setStyleSheet(stile.FOGLIO_DI_STILE)
+
+        self.tray_icon = QSystemTrayIcon(QIcon(str(percorso_risorsa("raphael.ico"))), self)
+        self.tray_icon.setToolTip(raphael.name)
+        self.tray_icon.show()
 
         sfondo = QWidget()
         sfondo.setObjectName("sfondo")
@@ -153,6 +161,12 @@ class FinestraRaphael(QMainWindow):
         # Da qui in poi è la finestra a chiedere conferma delle azioni a rischio.
         if hasattr(raphael, "azioni"):
             raphael.azioni.chiedi_conferma = self.chiedi_conferma
+
+        # E a mostrare il popup quando scatta un promemoria.
+        # Il core legge notifica_esterna a ogni promemoria, quindi non importa
+        # come il Pianificatore ha salvato il callback nel suo costruttore.
+        if hasattr(raphael, "notifica_esterna"):
+            raphael.notifica_esterna = self._ricevi_promemoria
 
     # ------------------------------------------------------- costruzione
 
@@ -635,6 +649,31 @@ class FinestraRaphael(QMainWindow):
         self.barra_conferma.hide()
         if self.in_attesa:
             self.attesa.mostra(f"{self.raphael.name} sta pensando...")
+
+    # ---------------------------------------------------------- promemoria
+
+    def _ricevi_promemoria(self, voce):
+        """Chiamata dal thread del pianificatore: passa l'avviso alla finestra.
+
+        Qui siamo nel thread del pianificatore: per toccare la UI si passa
+        attraverso il segnale, che viene recapitato nel thread della finestra.
+        """
+        self.segnali.promemoria_arrivato.emit(voce)
+
+    def _mostra_notifica_promemoria(self, voce):
+        testo = voce["testo"] if isinstance(voce, dict) else str(voce)
+
+        if self.tray_icon.isSystemTrayAvailable() and self.tray_icon.isVisible():
+            self.tray_icon.showMessage(
+                self.raphael.name,
+                testo,
+                QIcon(str(percorso_risorsa("raphael.ico"))),
+                DURATA_NOTIFICA_MS,
+            )
+        else:
+            # Senza system tray (o con notifiche disattivate) il promemoria
+            # resta comunque visibile con un popup della finestra.
+            QMessageBox.information(self, self.raphael.name, f"⏰ {testo}")
 
     def closeEvent(self, evento):
         if self.richiesta_conferma is not None:
