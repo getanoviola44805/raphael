@@ -19,6 +19,7 @@ MESSAGGIO_RISPOSTA_VUOTA = (
     "⚠️ Non sono riuscito a generare una risposta. Prova a riformulare la domanda."
 )
 MAX_GIRI_STRUMENTI = 5
+TEMPERATURA = 0.2  # bassa apposta: con gli strumenti serve precisione, non fantasia
 
 INGRANAGGIO = "\u2699"  # ⚙
 # Le righe "⚙️ ..." le scrive il programma quando uno strumento è stato usato
@@ -122,7 +123,7 @@ class OllamaProvider(AIProvider):
                 model=self.model,
                 messages=self._prepara_messaggi(prompt, history),
                 think=False,
-                options={"num_ctx": self.context_length},
+                options={"num_ctx": self.context_length, "temperature": TEMPERATURA},
             )
         except (ConnectionError, httpx.ConnectError):
             return MESSAGGIO_OLLAMA_SPENTO
@@ -160,7 +161,7 @@ class OllamaProvider(AIProvider):
                     model=self.model,
                     messages=messaggi,
                     think=ragiona,
-                    options={"num_ctx": self.context_length},
+                    options={"num_ctx": self.context_length, "temperature": TEMPERATURA},
                     stream=True,
                     **opzioni_extra,
                 )

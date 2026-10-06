@@ -30,3 +30,5 @@ ddgs
 PySide6-Essentials
 pyinstaller
 pypdf
+pycaw
+mss

@@ -8,6 +8,7 @@ def main():
     configure_logging()
 
     app = RaphaelApp()
+    app.pianificatore.avvia()
 
     if "--terminale" in sys.argv:
         app.start()

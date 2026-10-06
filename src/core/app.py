@@ -11,8 +11,10 @@ from conversation.history import ConversationHistory
 from memory.memoria import MemoriaLungoTermine
 from tools.lettura_file import STRUMENTI_LETTURA
 from tools.pc_control import STRUMENTI_PC
+from tools.schermo import crea_strumenti_schermo
 from tools.strumenti_azioni import STRUMENTI_GIA_REGISTRATI, crea_strumenti_azioni
 from tools.strumenti_memoria import crea_strumenti_memoria
+from tools.strumenti_tempo import crea_strumenti_tempo
 from tools.web_search import (
     cerca_sul_web,
     formatta_fonti,
@@ -25,6 +27,7 @@ from . import config
 from .azioni import ESITO_STRUMENTO, GestoreAzioni, RegistroAzioni, interpreta_giorno
 from .command_handler import CommandHandler
 from .config import APP_NAME, APP_VERSION
+from .promemoria import AgendaPromemoria, Pianificatore
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +67,16 @@ class RaphaelApp:
             azioni = GestoreAzioni(RegistroAzioni(config.ACTIONS_LOG_FILE))
         self.azioni = azioni
 
+        self.agenda = AgendaPromemoria(config.REMINDERS_FILE)
+        # La finestra grafica sovrascrive questo callback per mostrare i popup.
+        # Resta None in modalità terminale. Viene letto a OGNI promemoria,
+        # quindi funziona anche se il Pianificatore ha catturato il riferimento
+        # a _notifica_promemoria nel suo costruttore o nel suo thread.
+        self.notifica_esterna = None
+        self.pianificatore = Pianificatore(
+            self.agenda, notifica=self._notifica_promemoria
+        )
+
         larghezza = min(100, shutil.get_terminal_size().columns - 1)
         self.console = Console(width=larghezza)
 
@@ -78,6 +91,8 @@ class RaphaelApp:
                     + [strumento_ricerca_web]
                     + crea_strumenti_memoria(self.memoria)
                     + crea_strumenti_azioni(self.azioni)
+                    + crea_strumenti_schermo(config.OLLAMA_MODEL, config.OLLAMA_CONTEXT_LENGTH)
+                    + crea_strumenti_tempo(self.agenda)
                 ),
                 osservatore_strumenti=self._registra_strumento,
             )
@@ -111,6 +126,18 @@ class RaphaelApp:
 
         valori = ", ".join(str(valore) for valore in (argomenti or {}).values())
         self.azioni.registro.registra(f"{nome}({valori})", ESITO_STRUMENTO, esito)
+
+    def _notifica_promemoria(self, voce):
+        """Avviso dei promemoria.
+
+        Se la finestra grafica è aperta, delega a lei (che mostra il popup
+        tramite segnale nel thread della UI). In modalità terminale stampa
+        sulla console come prima.
+        """
+        if self.notifica_esterna is not None:
+            self.notifica_esterna(voce)
+            return
+        self.console.print(f"\n[bold yellow]⏰ {voce['testo']}[/bold yellow]\n")
 
     def gestisci_comando(self, comando):
         return "".join(self.gestisci_comando_stream(comando))
