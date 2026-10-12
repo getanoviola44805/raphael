@@ -14,6 +14,9 @@ def crea_strumenti_memoria(memoria) -> list:
         il lavoro, i progetti in corso o come preferisce le risposte.
         Non usarlo per cose temporanee, di poco conto o già presenti in memoria.
         Non salvare mai password, codici, dati bancari o informazioni sulla salute.
+        Sulle altre persone salva solo fatti pratici (nome, ruolo, compleanno):
+        mai orientamento sessuale, salute, religione, idee politiche o altri
+        dettagli privati, anche se l'utente li racconta.
 
         Args:
             informazione: Il fatto da ricordare, in una frase breve in terza persona, ad esempio "Studia Ingegneria Informatica a Catania".

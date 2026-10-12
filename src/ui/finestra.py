@@ -1,10 +1,11 @@
+import logging
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -34,6 +35,10 @@ from .componenti import (
     bottone_icona,
     carattere_interfaccia,
 )
+from .notifica import GestoreAvvisi
+
+
+logger = logging.getLogger(__name__)
 
 
 MESSAGGI_MOSTRATI_ALL_AVVIO = 20
@@ -44,7 +49,6 @@ FILTRO_IMMAGINI = "Immagini (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 DOMANDA_PREDEFINITA_IMMAGINE = "Descrivi questa immagine."
 TEMPO_MASSIMO_CONFERMA_S = 300
 DISTANZA_DAL_FONDO = 40
-DURATA_NOTIFICA_MS = 8000
 
 
 def salva_immagine_ridotta(immagine: QImage, cartella: Path, nome_base: str) -> Path:
@@ -121,6 +125,7 @@ class FinestraRaphael(QMainWindow):
         self._risposta_in_arrivo = None
         self._segui_il_fondo = True
         self.richiesta_conferma = None
+        self._ultimo_testo = ""
 
         self.segnali = _Segnali()
         self.segnali.pezzo_ricevuto.connect(self._ricevi_pezzo)
@@ -128,6 +133,17 @@ class FinestraRaphael(QMainWindow):
         self.segnali.conferma_richiesta.connect(self._mostra_conferma)
         self.segnali.conferma_scaduta.connect(self._conferma_scaduta)
         self.segnali.promemoria_arrivato.connect(self._mostra_notifica_promemoria)
+
+        # Le notifiche dei promemoria, in basso a destra sopra a tutto.
+        self.avvisi = GestoreAvvisi(parent=self)
+        self.avvisi.rimanda.connect(self._rimanda_promemoria)
+        # Se Raphael ha la voce, i promemoria vengono anche letti ad alta voce.
+        if getattr(raphael, "voce", None) is not None:
+            self.avvisi.parla = raphael.parla
+
+        # Esc zittisce Raphael mentre parla.
+        self.scorciatoia_zitto = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self.scorciatoia_zitto.activated.connect(self.zittisci)
 
         self.timer_aggiornamento = QTimer(self)
         self.timer_aggiornamento.setInterval(INTERVALLO_AGGIORNAMENTO_MS)
@@ -285,6 +301,22 @@ class FinestraRaphael(QMainWindow):
             "più lento, ma più preciso su matematica, fisica ed esercizi"
         )
 
+        self.bottone_voce = QPushButton("🔊 Voce")
+        self.bottone_voce.setObjectName("bottoneRagiona")
+        self.bottone_voce.setCheckable(True)
+        self.bottone_voce.setFixedHeight(30)
+        self.bottone_voce.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.bottone_voce.toggled.connect(self._cambia_lettura_ad_alta_voce)
+        if getattr(self.raphael, "voce", None) is None:
+            self.bottone_voce.setEnabled(False)
+            self.bottone_voce.setToolTip(
+                "La voce non è installata: scrivi /voce per sapere cosa manca"
+            )
+        else:
+            self.bottone_voce.setToolTip(
+                "Raphael legge le risposte ad alta voce. Esc per zittirlo"
+            )
+
         self.bottone = QPushButton("↑")
         self.bottone.setObjectName("bottoneInvia")
         self.bottone.setFixedSize(34, 34)
@@ -297,6 +329,7 @@ class FinestraRaphael(QMainWindow):
         riga_strumenti.setSpacing(6)
         riga_strumenti.addWidget(self.bottone_allega)
         riga_strumenti.addWidget(self.bottone_ragiona)
+        riga_strumenti.addWidget(self.bottone_voce)
         riga_strumenti.addStretch(1)
         riga_strumenti.addWidget(self.bottone)
 
@@ -436,6 +469,10 @@ class FinestraRaphael(QMainWindow):
         if not testo:
             testo = DOMANDA_PREDEFINITA_IMMAGINE
 
+        # Una nuova domanda interrompe la risposta che Raphael sta leggendo.
+        self.zittisci()
+        self._ultimo_testo = testo
+
         immagini = [self.allegato] if self.allegato is not None else None
         ragiona = self.bottone_ragiona.isChecked()
 
@@ -510,6 +547,7 @@ class FinestraRaphael(QMainWindow):
         self._risposta_in_arrivo.imposta_testo(self.risposta_parziale)
         self._risposta_in_arrivo.completa()
         self.messaggi.append({"role": "assistant", "content": self.risposta_parziale})
+        self._leggi_se_serve(self.risposta_parziale)
 
         self.risposta_parziale = ""
         self._risposta_in_arrivo = None
@@ -539,6 +577,29 @@ class FinestraRaphael(QMainWindow):
             self.attesa.mostra(f"{self.raphael.name} sta pensando...")
 
         self._aggiorna_benvenuto()
+
+    # --------------------------------------------------------------- voce
+
+    def _cambia_lettura_ad_alta_voce(self, attiva):
+        self.raphael.leggi_risposte = bool(attiva)
+        if not attiva:
+            self.zittisci()
+
+    def _leggi_se_serve(self, risposta):
+        # Il bottone segue anche i comandi /voce on e /voce off.
+        attiva = bool(getattr(self.raphael, "leggi_risposte", False))
+        if self.bottone_voce.isChecked() != attiva:
+            self.bottone_voce.blockSignals(True)
+            self.bottone_voce.setChecked(attiva)
+            self.bottone_voce.blockSignals(False)
+
+        if attiva and not self._ultimo_testo.lower().startswith("/voce"):
+            self.raphael.parla(risposta)
+
+    def zittisci(self):
+        ferma = getattr(self.raphael, "ferma_voce", None)
+        if ferma is not None:
+            ferma()
 
     # ------------------------------------------------------------ conferma
 
@@ -661,23 +722,30 @@ class FinestraRaphael(QMainWindow):
         self.segnali.promemoria_arrivato.emit(voce)
 
     def _mostra_notifica_promemoria(self, voce):
-        testo = voce["testo"] if isinstance(voce, dict) else str(voce)
+        """Mostra il riquadro del promemoria e fa lampeggiare Raphael nella barra."""
+        self.avvisi.mostra(voce)
+        QApplication.alert(self)
 
-        if self.tray_icon.isSystemTrayAvailable() and self.tray_icon.isVisible():
-            self.tray_icon.showMessage(
-                self.raphael.name,
-                testo,
-                QIcon(str(percorso_risorsa("raphael.ico"))),
-                DURATA_NOTIFICA_MS,
-            )
-        else:
-            # Senza system tray (o con notifiche disattivate) il promemoria
-            # resta comunque visibile con un popup della finestra.
-            QMessageBox.information(self, self.raphael.name, f"⏰ {testo}")
+    def _rimanda_promemoria(self, voce, minuti):
+        """Il bottone "Rimanda": rimette lo stesso promemoria in agenda più avanti."""
+        agenda = getattr(self.raphael, "agenda", None)
+        if agenda is None:
+            return
+
+        quando = datetime.now() + timedelta(minutes=minuti)
+        try:
+            agenda.aggiungi(voce["testo"], quando)
+        except (KeyError, TypeError, ValueError) as errore:
+            logger.warning("Non sono riuscito a rimandare il promemoria: %s", errore)
 
     def closeEvent(self, evento):
         if self.richiesta_conferma is not None:
             self.richiesta_conferma.rispondi(False)
+        self.avvisi.chiudi_tutti()
+        self.zittisci()
+        pianificatore = getattr(self.raphael, "pianificatore", None)
+        if pianificatore is not None:
+            pianificatore.ferma()
         self.raphael.salva_cronologia()
         super().closeEvent(evento)
 
@@ -705,5 +773,10 @@ def avvia_finestra(raphael):
     finestra = FinestraRaphael(raphael)
     finestra.show()
     stile.barra_del_titolo_scura(finestra)
+
+    # Il pianificatore parte solo adesso che la finestra esiste: così anche i
+    # promemoria scaduti mentre Raphael era spento compaiono nel riquadro.
+    if hasattr(raphael, "pianificatore"):
+        raphael.pianificatore.avvia()
 
     return applicazione.exec()

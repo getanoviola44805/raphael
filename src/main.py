@@ -8,9 +8,10 @@ def main():
     configure_logging()
 
     app = RaphaelApp()
-    app.pianificatore.avvia()
+    app.prepara_in_background()
 
     if "--terminale" in sys.argv:
+        app.pianificatore.avvia()
         app.start()
     else:
         from ui.finestra import avvia_finestra

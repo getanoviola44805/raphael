@@ -32,3 +32,8 @@ pyinstaller
 pypdf
 pycaw
 mss
+# Voce. Su Python 3.14 installare con: pip install kokoro-onnx sounddevice --ignore-requires-python
+kokoro-onnx
+sounddevice
+edge-tts
+soundfile

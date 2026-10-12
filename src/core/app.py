@@ -1,5 +1,6 @@
 import logging
 import shutil
+import threading
 from pathlib import Path
 
 from rich.console import Console
@@ -10,7 +11,11 @@ from ai.router import AIRouter
 from conversation.history import ConversationHistory
 from memory.memoria import MemoriaLungoTermine
 from tools.lettura_file import STRUMENTI_LETTURA
-from tools.pc_control import STRUMENTI_PC
+from tools.pc_control import (
+    STRUMENTI_PC,
+    cerca_programma_installato,
+    prepara_elenco_programmi,
+)
 from tools.schermo import crea_strumenti_schermo
 from tools.strumenti_azioni import STRUMENTI_GIA_REGISTRATI, crea_strumenti_azioni
 from tools.strumenti_memoria import crea_strumenti_memoria
@@ -22,9 +27,11 @@ from tools.web_search import (
 )
 from tools.web_search import ricerca_web as strumento_ricerca_web
 from ui.formattazione import converti_latex
+from voce.sintesi import crea_voce, perche_manca_la_voce
 
 from . import config
 from .azioni import ESITO_STRUMENTO, GestoreAzioni, RegistroAzioni, interpreta_giorno
+from .comandi_rapidi import ComandiRapidi
 from .command_handler import CommandHandler
 from .config import APP_NAME, APP_VERSION
 from .promemoria import AgendaPromemoria, Pianificatore
@@ -39,9 +46,22 @@ COMANDO_DIMENTICA = "/dimentica"
 COMANDO_REGISTRO = "/registro"
 COMANDO_ANNULLA = "/annulla"
 COMANDO_SOLA_LETTURA = "/solalettura"
+COMANDO_VOCE = "/voce"
+
+FRASE_DI_PROVA = "Ciao, sono Raphael. Questa è la mia voce."
 
 # Strumenti di sola consultazione che non serve annotare nel registro.
 STRUMENTI_DA_NON_REGISTRARE = STRUMENTI_GIA_REGISTRATI | {"data_e_ora"}
+
+# Strumenti il cui esito basta come risposta: se riescono, il modello non
+# fa un secondo giro solo per scrivere "Fatto!".
+STRUMENTI_CONCLUSIVI = {
+    "apri_programma",
+    "apri_sito",
+    "apri_file",
+    "imposta_promemoria",
+    "cancella_promemoria",
+}
 
 
 def _e_il_comando(comando, nome):
@@ -54,7 +74,9 @@ def e_una_ricerca(comando):
 
 
 class RaphaelApp:
-    def __init__(self, ai_provider=None, ricerca_web=None, memoria=None, azioni=None):
+    def __init__(
+        self, ai_provider=None, ricerca_web=None, memoria=None, azioni=None, voce="auto"
+    ):
         self.name = APP_NAME
         self.version = APP_VERSION
         self.command_handler = CommandHandler(self.name, self.version)
@@ -77,6 +99,21 @@ class RaphaelApp:
             self.agenda, notifica=self._notifica_promemoria
         )
 
+        # Le richieste semplici ("apri Discord", "timer di 10 minuti") vengono
+        # eseguite subito, senza passare dal modello.
+        self.comandi_rapidi = ComandiRapidi(trova_programma=cerca_programma_installato)
+        self._strumenti_rapidi = {
+            strumento.__name__: strumento
+            for strumento in STRUMENTI_PC + crea_strumenti_tempo(self.agenda)
+        }
+
+        # La voce: None se kokoro-onnx o i file del modello non ci sono.
+        self.cartella_voce = config.DATA_DIR / "voce"
+        if voce == "auto":
+            voce = crea_voce(self.cartella_voce)
+        self.voce = voce
+        self.leggi_risposte = False
+
         larghezza = min(100, shutil.get_terminal_size().columns - 1)
         self.console = Console(width=larghezza)
 
@@ -95,6 +132,7 @@ class RaphaelApp:
                     + crea_strumenti_tempo(self.agenda)
                 ),
                 osservatore_strumenti=self._registra_strumento,
+                strumenti_conclusivi=STRUMENTI_CONCLUSIVI,
             )
 
         if ricerca_web is None:
@@ -168,6 +206,7 @@ class RaphaelApp:
         for gestore_comandi in (
             self._gestisci_comando_memoria,
             self._gestisci_comando_azioni,
+            self._gestisci_comando_voce,
         ):
             risposta_diretta = gestore_comandi(comando)
             if risposta_diretta is not None:
@@ -179,6 +218,12 @@ class RaphaelApp:
         if risposta != "Comando non riconosciuto." and not immagini:
             yield risposta
             return
+
+        if not immagini and not ragiona:
+            risposta_rapida = self._esegui_comando_rapido(comando)
+            if risposta_rapida is not None:
+                yield risposta_rapida
+                return
 
         # Le opzioni vengono passate solo se servono, così i provider che non
         # le conoscono continuano a funzionare come prima.
@@ -192,6 +237,107 @@ class RaphaelApp:
             comando,
             self.history.get_recent_messages(config.MAX_HISTORY_MESSAGES),
             **opzioni,
+        )
+
+    def _esegui_comando_rapido(self, comando):
+        """Esegue subito le richieste semplici, oppure restituisce None."""
+        chiamate = self.comandi_rapidi.interpreta(comando)
+        if not chiamate:
+            return None
+
+        righe = []
+        for chiamata in chiamate:
+            strumento = self._strumenti_rapidi.get(chiamata.nome)
+            if strumento is None:
+                return None
+
+            logger.info("Comando rapido: %s %s", chiamata.nome, chiamata.argomenti)
+            try:
+                esito = str(strumento(**chiamata.argomenti))
+            except Exception as errore:
+                esito = f"Errore durante '{chiamata.nome}': {errore}"
+            self._registra_strumento(chiamata.nome, chiamata.argomenti, esito)
+
+            if chiamata.nome == "data_e_ora":
+                righe.append(esito)
+            else:
+                righe.append(f"*⚙️ {esito.splitlines()[0]}*")
+
+        return "\n\n".join(righe)
+
+    def prepara_in_background(self):
+        """All'avvio carica il modello e l'elenco dei programmi, senza bloccare.
+
+        Così la prima domanda non aspetta il caricamento del modello e il
+        primo "apri ..." non aspetta PowerShell.
+        """
+        provider = getattr(self.ai_router, "provider", None)
+        lavori = [prepara_elenco_programmi]
+        if hasattr(provider, "prepara"):
+            lavori.append(provider.prepara)
+        if self.voce is not None:
+            lavori.append(self.voce.prepara)
+
+        for lavoro in lavori:
+            threading.Thread(target=lavoro, daemon=True, name="preparazione").start()
+
+    # ------------------------------------------------------------- voce
+
+    def parla(self, testo):
+        """Legge il testo ad alta voce, se la voce è disponibile."""
+        if self.voce is None:
+            return False
+        try:
+            return self.voce.parla(testo)
+        except Exception:
+            logger.exception("La voce non è riuscita a parlare")
+            return False
+
+    def ferma_voce(self):
+        if self.voce is not None:
+            self.voce.ferma()
+
+    def _motore_della_voce(self):
+        return getattr(self.voce, "motore", None)
+
+    def _gestisci_comando_voce(self, comando):
+        """/voce, /voce on|off|prova|online|offline. Altrimenti None."""
+        if not _e_il_comando(comando, COMANDO_VOCE):
+            return None
+
+        if self.voce is None:
+            return "🔇 La voce non è disponibile. " + (
+                perche_manca_la_voce(self.cartella_voce) or ""
+            )
+
+        scelta = comando[len(COMANDO_VOCE):].strip().lower()
+        if scelta in {"on", "si", "sì", "attiva"}:
+            self.leggi_risposte = True
+            return "🔊 D'ora in poi leggo le risposte ad alta voce."
+        if scelta in {"off", "no", "disattiva"}:
+            self.leggi_risposte = False
+            self.ferma_voce()
+            return "🔇 Non leggo più le risposte ad alta voce."
+        if scelta == "prova":
+            self.parla(FRASE_DI_PROVA)
+            return f"🔊 {FRASE_DI_PROVA}"
+
+        motore = self._motore_della_voce()
+        if scelta in {"online", "offline"}:
+            if not hasattr(motore, "solo_offline"):
+                return "Questa voce non ha le modalità online e offline."
+            motore.solo_offline = scelta == "offline"
+            if scelta == "offline":
+                return "🔒 Uso solo la voce del PC: niente testo ai server Microsoft."
+            return "🌐 Uso la voce online quando c'è internet, quella del PC quando non c'è."
+
+        stato = "attiva 🔊" if self.leggi_risposte else "disattivata 🔇"
+        voce_attuale = ""
+        if hasattr(motore, "descrizione"):
+            voce_attuale = f" Voce: {motore.descrizione()}."
+        return (
+            f"La lettura ad alta voce è {stato}.{voce_attuale} "
+            "Comandi: /voce on, /voce off, /voce prova, /voce online, /voce offline."
         )
 
     def _gestisci_comando_memoria(self, comando):
@@ -311,5 +457,8 @@ class RaphaelApp:
             if e_una_ricerca(comando):
                 self.console.print("[dim]Sto cercando sul web...[/dim]")
 
+            self.ferma_voce()
             risposta = self.gestisci_comando(comando)
             self.mostra_risposta(risposta)
+            if self.leggi_risposte and not _e_il_comando(comando, COMANDO_VOCE):
+                self.parla(risposta)

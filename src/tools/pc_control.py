@@ -6,9 +6,11 @@ eseguono comandi arbitrari.
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
+import threading
 import unicodedata
 import webbrowser
 from datetime import datetime
@@ -37,13 +39,22 @@ SINONIMI_PROGRAMMI = {
     "calcolatrice": "calcolatrice",
 }
 
+# Parole troppo comuni per riconoscere un programma da sole.
+PAROLE_GENERICHE = {
+    "microsoft", "google", "adobe", "autodesk", "apple", "windows", "app",
+    "programma", "the", "per", "and", "pro", "studio", "editor",
+}
+
 GIORNI = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"]
 MESI = [
     "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
     "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
 ]
 
+logger = logging.getLogger(__name__)
+
 _programmi_in_cache = None
+_lucchetto_programmi = threading.Lock()
 
 
 def _normalizza(testo: str) -> str:
@@ -80,10 +91,30 @@ def _elenca_programmi_installati() -> list[dict]:
 def _programmi_installati() -> list[dict]:
     global _programmi_in_cache
 
-    if _programmi_in_cache is None:
-        _programmi_in_cache = _elenca_programmi_installati()
+    # Il lucchetto evita due PowerShell insieme se l'utente chiede di aprire
+    # qualcosa mentre l'elenco si sta ancora preparando all'avvio.
+    with _lucchetto_programmi:
+        if _programmi_in_cache is None:
+            _programmi_in_cache = _elenca_programmi_installati()
 
     return _programmi_in_cache
+
+
+def prepara_elenco_programmi() -> None:
+    """Legge subito l'elenco dei programmi, così il primo "apri ..." è istantaneo."""
+    try:
+        quanti = len(_programmi_installati())
+        logger.info("Elenco dei programmi pronto: %s programmi", quanti)
+    except Exception as errore:
+        logger.warning("Non sono riuscito a leggere l'elenco dei programmi: %s", errore)
+
+
+def cerca_programma_installato(nome: str) -> dict | None:
+    """Il programma installato che corrisponde al nome, oppure None."""
+    try:
+        return trova_programma(nome, _programmi_installati())
+    except Exception:
+        return None
 
 
 def trova_programma(nome: str, programmi: list[dict]) -> dict | None:
@@ -107,7 +138,32 @@ def trova_programma(nome: str, programmi: list[dict]) -> dict | None:
         if gruppo:
             return min(gruppo, key=lambda programma: len(programma["nome"]))
 
-    return None
+    return _trova_per_parole(richiesto, programmi)
+
+
+def _trova_per_parole(richiesto: str, programmi: list[dict]) -> dict | None:
+    """Ultima possibilità: le parole in comune, per esempio "Fusion 360" → "Autodesk Fusion".
+
+    Contano solo le parole che distinguono davvero un programma: numeri e nomi
+    di aziende come "Microsoft" non bastano, altrimenti "Microsoft Word"
+    aprirebbe Microsoft Teams.
+    """
+    parole_richieste = {
+        parola for parola in richiesto.split()
+        if len(parola) > 2 and not parola.isdigit() and parola not in PAROLE_GENERICHE
+    }
+    if not parole_richieste:
+        return None
+
+    candidati = []
+    for programma in programmi:
+        comuni = parole_richieste & set(_normalizza(programma["nome"]).split())
+        if len(comuni) * 2 >= len(parole_richieste) and comuni:
+            candidati.append((len(comuni), -len(programma["nome"]), programma))
+
+    if not candidati:
+        return None
+    return max(candidati, key=lambda candidato: candidato[:2])[2]
 
 
 def apri_programma(nome: str) -> str:
@@ -139,7 +195,7 @@ def apri_sito(indirizzo: str) -> str:
     """Apre un sito web nel browser predefinito dell'utente.
 
     Args:
-        indirizzo: L'indirizzo del sito, ad esempio "youtube.com" o "https://www.unict.it".
+        indirizzo: L'indirizzo del sito che l'utente ha chiesto, ad esempio "https://www.unict.it".
 
     Returns:
         L'esito dell'operazione.

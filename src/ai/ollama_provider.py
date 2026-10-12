@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from collections.abc import Callable, Iterator
 
 import httpx
@@ -20,6 +21,17 @@ MESSAGGIO_RISPOSTA_VUOTA = (
 )
 MAX_GIRI_STRUMENTI = 5
 TEMPERATURA = 0.2  # bassa apposta: con gli strumenti serve precisione, non fantasia
+
+# Per quanto tempo Ollama tiene il modello in memoria dopo l'ultima domanda.
+# Ricaricarlo da zero richiede parecchi secondi: è il motivo principale per cui
+# a volte la prima risposta dopo una pausa è lenta.
+MANTIENI_CARICATO = "30m"
+
+# Esiti che indicano che uno strumento non è riuscito: in quel caso il modello
+# deve rileggerli e decidere cosa fare, quindi il secondo giro serve.
+INIZI_DI_FALLIMENTO = (
+    "Non ", "Errore", "Per sicurezza", "Lo strumento", "Posso ", "Il percorso", "⚠",
+)
 
 INGRANAGGIO = "\u2699"  # ⚙
 # Le righe "⚙️ ..." le scrive il programma quando uno strumento è stato usato
@@ -48,12 +60,18 @@ class OllamaProvider(AIProvider):
         context_length: int = 4096,
         strumenti: list | None = None,
         osservatore_strumenti: Callable[[str, dict, str], None] | None = None,
+        strumenti_conclusivi: set[str] | None = None,
+        keep_alive: str = MANTIENI_CARICATO,
     ):
         self.model = model
         self.system_prompt = system_prompt
         self.context_length = context_length
         self.strumenti = list(strumenti or [])
         self.osservatore_strumenti = osservatore_strumenti
+        # Strumenti il cui esito basta come risposta ("Ho aperto Discord."):
+        # se riescono, non serve un secondo giro del modello per commentarli.
+        self.strumenti_conclusivi = set(strumenti_conclusivi or ())
+        self.keep_alive = keep_alive
         self._strumenti_per_nome = {
             strumento.__name__: strumento for strumento in self.strumenti
         }
@@ -89,12 +107,60 @@ class OllamaProvider(AIProvider):
         return messages
 
     def _registra_statistiche(self, risposta):
+        def secondi(chiave):
+            return (risposta.get(chiave) or 0) / 1e9
+
         logger.info(
-            "Ollama: motivo fine=%s, token domanda=%s, token risposta=%s",
+            "Ollama: motivo fine=%s, token domanda=%s, token risposta=%s, "
+            "durata=%.1fs (caricamento %.1fs, lettura %.1fs, scrittura %.1fs)",
             risposta.get("done_reason"),
             risposta.get("prompt_eval_count"),
             risposta.get("eval_count"),
+            secondi("total_duration"),
+            secondi("load_duration"),
+            secondi("prompt_eval_duration"),
+            secondi("eval_duration"),
         )
+
+    def prepara(self) -> bool:
+        """Carica il modello e legge in anticipo le istruzioni fisse.
+
+        Ollama conserva quello che ha già letto: così alla prima domanda vera
+        il modello è già in memoria e le ~4.000 parole di istruzioni e
+        strumenti non vanno rilette da capo.
+        """
+        inizio = time.perf_counter()
+        opzioni_extra = {"tools": self.strumenti} if self.strumenti else {}
+        try:
+            ollama.chat(
+                model=self.model,
+                messages=self._prepara_messaggi("ciao", None),
+                think=False,
+                options={
+                    "num_ctx": self.context_length,
+                    "temperature": TEMPERATURA,
+                    "num_predict": 1,
+                },
+                keep_alive=self.keep_alive,
+                **opzioni_extra,
+            )
+        except Exception as errore:
+            logger.warning("Preparazione del modello non riuscita: %s", errore)
+            return False
+
+        logger.info("Modello pronto in %.1f s", time.perf_counter() - inizio)
+        return True
+
+    def _giro_concluso(self, chiamate: list, esiti: list[str]) -> bool:
+        """Vero se tutti gli strumenti usati sono conclusivi e sono riusciti."""
+        if not self.strumenti_conclusivi or not chiamate:
+            return False
+        for chiamata, esito in zip(chiamate, esiti):
+            if chiamata["function"]["name"] not in self.strumenti_conclusivi:
+                return False
+            if esito.strip().startswith(INIZI_DI_FALLIMENTO):
+                return False
+        return True
 
     def _esegui_strumento(self, nome: str, argomenti: dict) -> str:
         strumento = self._strumenti_per_nome.get(nome)
@@ -124,6 +190,7 @@ class OllamaProvider(AIProvider):
                 messages=self._prepara_messaggi(prompt, history),
                 think=False,
                 options={"num_ctx": self.context_length, "temperature": TEMPERATURA},
+                keep_alive=self.keep_alive,
             )
         except (ConnectionError, httpx.ConnectError):
             return MESSAGGIO_OLLAMA_SPENTO
@@ -162,6 +229,7 @@ class OllamaProvider(AIProvider):
                     messages=messaggi,
                     think=ragiona,
                     options={"num_ctx": self.context_length, "temperature": TEMPERATURA},
+                    keep_alive=self.keep_alive,
                     stream=True,
                     **opzioni_extra,
                 )
@@ -194,10 +262,12 @@ class OllamaProvider(AIProvider):
                     }
                 )
 
+                esiti = []
                 for chiamata in chiamate:
                     nome = chiamata["function"]["name"]
                     argomenti = chiamata["function"]["arguments"] or {}
                     esito = self._esegui_strumento(nome, argomenti)
+                    esiti.append(esito)
 
                     testo_generato = True
                     yield f"\n\n*⚙️ {esito.splitlines()[0]}*\n\n"
@@ -205,6 +275,10 @@ class OllamaProvider(AIProvider):
                     messaggi.append(
                         {"role": "tool", "content": esito, "tool_name": nome}
                     )
+
+                # "Ho aperto Discord." basta come risposta: niente secondo giro.
+                if self._giro_concluso(chiamate, esiti):
+                    break
 
         except (ConnectionError, httpx.ConnectError):
             yield MESSAGGIO_OLLAMA_SPENTO
